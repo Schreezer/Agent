@@ -616,48 +616,54 @@ class ClaudeCodeManager extends EventEmitter {
      * Detect if there's new command output based on ⏺ symbol content changes
      */
     detectNewCommandOutput(agent) {
-        const current30Lines = agent.fullOutput.split('\n').slice(-30);
-        const currentText = current30Lines.join('\n');
-        
-        // Check for ⏺ symbol presence
-        const hasRecordSymbol = /⏺/.test(currentText);
+        // Check FULL buffer for ⏺ symbol, not just last lines
+        const hasRecordSymbol = /⏺/.test(agent.outputBuffer);
         
         if (!hasRecordSymbol) {
             // No symbol yet, continue waiting
-            return { hasNewOutput: false, reason: 'No ⏺ symbol found' };
+            return { hasNewOutput: false, reason: 'No ⏺ symbol found in buffer' };
         }
         
-        // Extract content after ⏺ symbol
-        const currentSymbolContent = this.extractContentAfterSymbol(currentText);
+        // For content comparison, use last 30 lines
+        const current30Lines = agent.fullOutput.split('\n').slice(-30);
+        const currentText = current30Lines.join('\n');
+        
+        // Extract ALL content after LAST ⏺ symbol in buffer
+        const bufferSymbolContent = this.extractContentAfterSymbol(agent.outputBuffer);
         const previousSymbolContent = agent.lastSymbolContent || '';
         
         // Check if content after ⏺ has changed
-        const contentChanged = currentSymbolContent !== previousSymbolContent;
-        const isStable = !this.containsProcessingIndicators(currentText);
+        const contentChanged = bufferSymbolContent !== previousSymbolContent && bufferSymbolContent.length > 10;
+        const isStable = !this.containsProcessingIndicators(agent.outputBuffer);
         
         // Debug logging for content comparison
-        if (currentSymbolContent !== previousSymbolContent) {
-            logger.info(`Agent ${agent.id} ⏺ content change detected:`);
-            logger.info(`Previous: "${previousSymbolContent.substring(0, 100)}..."`);
-            logger.info(`Current:  "${currentSymbolContent.substring(0, 100)}..."`);
+        logger.info(`Agent ${agent.id} ⏺ symbol analysis:`);
+        logger.info(`Current content after ⏺: "${bufferSymbolContent.substring(0, 100)}..."`);
+        logger.info(`Previous content after ⏺: "${previousSymbolContent.substring(0, 100)}..."`);
+        logger.info(`Content changed: ${contentChanged}, Is stable: ${isStable}, Length: ${bufferSymbolContent.length}`);
+        
+        if (contentChanged) {
+            logger.info(`Agent ${agent.id} ⏺ CONTENT CHANGE DETECTED!`);
+        } else {
+            logger.info(`Agent ${agent.id} ⏺ content unchanged - no new output`);
         }
         
         // Update tracking
-        agent.lastSymbolContent = currentSymbolContent;
+        agent.lastSymbolContent = bufferSymbolContent;
         agent.previous30Lines = [...current30Lines];
         agent.hasRecordSymbol = hasRecordSymbol;
         
-        if (contentChanged && isStable && currentSymbolContent.length > 0) {
+        if (contentChanged && isStable && bufferSymbolContent.length > 0) {
             return { 
                 hasNewOutput: true, 
-                reason: `New content after ⏺: ${currentSymbolContent.substring(0, 50)}...`,
-                symbolContent: currentSymbolContent 
+                reason: `New content after ⏺: ${bufferSymbolContent.substring(0, 50)}...`,
+                symbolContent: bufferSymbolContent 
             };
         }
         
         return { 
             hasNewOutput: false, 
-            reason: `No change - Content: "${currentSymbolContent.substring(0, 30)}...", Changed: ${contentChanged}, Stable: ${isStable}` 
+            reason: `No change - Content: "${bufferSymbolContent.substring(0, 30)}...", Changed: ${contentChanged}, Stable: ${isStable}` 
         };
     }
     
@@ -693,21 +699,51 @@ class ClaudeCodeManager extends EventEmitter {
             agent.isCheckingOutput = true;
             const currentLastLines = agent.lastLines.join('\n');
             
+            // DEBUG: Show current buffer and output content (reduced)
+            logger.debug(`Agent ${agent.id} check: Buffer=${agent.outputBuffer.length} chars, Lines=${agent.lastLines.length}`);
+            
             // Skip if no new meaningful output
             if (!forceSend && currentLastLines === agent.lastSentOutput) {
+                logger.debug(`Agent ${agent.id} - Same output as last sent, skipping`);
                 agent.isCheckingOutput = false;
                 return;
             }
             
             // Skip if no meaningful output at all
             if (!forceSend && (!currentLastLines || currentLastLines.trim().length === 0)) {
-                logger.debug(`No meaningful output for agent ${agent.id} yet`);
+                logger.debug(`Agent ${agent.id} - No meaningful output yet`);
                 agent.isCheckingOutput = false;
                 return;
             }
             
             // Smart ⏺ symbol detection - only process when content after symbol changes
             const detection = this.detectNewCommandOutput(agent);
+            
+            logger.info(`Agent ${agent.id} detection result: ${detection.hasNewOutput ? 'SEND' : 'SKIP'} - ${detection.reason}`);
+            
+            // Comment out temporary fallback - ⏺ detection should work now
+            /*
+            if (agent.outputBuffer.length > 1000) {
+                logger.info(`Agent ${agent.id} TEMP: Sending output due to large buffer (${agent.outputBuffer.length} chars) - bypassing ⏺ detection`);
+                
+                agent.conversationHistory.push({
+                    type: 'claude',
+                    content: agent.outputBuffer,
+                    timestamp: Date.now()
+                });
+                
+                this.emit('agent-output', {
+                    agentId: agent.id,
+                    chatId: agent.chatId,
+                    text: agent.outputBuffer
+                });
+                
+                agent.outputBuffer = '';
+                agent.lastSentOutput = currentLastLines;
+                agent.isCheckingOutput = false;
+                return;
+            }
+            */
             
             if (!detection.hasNewOutput) {
                 logger.debug(`Agent ${agent.id}: ${detection.reason}`);
