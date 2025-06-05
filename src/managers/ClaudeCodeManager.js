@@ -199,10 +199,8 @@ class ClaudeCodeManager extends EventEmitter {
                 content: task,
                 timestamp: Date.now()
             }], // Track full conversation flow
-            // Smart ⏺ symbol detection
-            lastSymbolContent: '', // Content after last ⏺ symbol
-            previous30Lines: [], // For comparison
-            hasRecordSymbol: false // Track ⏺ presence
+            // Output tracking
+            lastSentBuffer: '' // Track what we last sent to avoid duplicates
         };
         
         this.activeAgents.set(taskId, agent);
@@ -604,66 +602,73 @@ class ClaudeCodeManager extends EventEmitter {
     }
     
     /**
-     * Check if there are processing indicators (ANSI escapes, loading)
+     * Check if Claude Code is still processing
      */
-    containsProcessingIndicators(text) {
-        return /\[2K\[1A\[2K/.test(text) || 
-               /\x1b\[/.test(text) ||
-               /Loading|Processing|Waiting/i.test(text);
+    isClaudeProcessing(text) {
+        // Multiple checks for processing state
+        
+        // 1. Check for "esc to interrupt" in various formats
+        const hasEscToInterrupt = /esc\s+to\s+interrupt/i.test(text);
+        
+        // 2. Check for active processing indicators like "Exploring..." with timer
+        const hasActiveTimer = /[✻⏺]\s*\w+…\s*\(\d+s\s*·/i.test(text);
+        
+        // 3. Check for "Waiting..." or "Running..." status
+        const hasActiveStatus = /⎿\s*(Waiting|Running|Processing|Exploring)\.{2,}/i.test(text);
+        
+        const isProcessing = hasEscToInterrupt || hasActiveTimer || hasActiveStatus;
+        
+        if (isProcessing) {
+            logger.debug(`Claude still processing - ESC:${hasEscToInterrupt}, Timer:${hasActiveTimer}, Status:${hasActiveStatus}`);
+        }
+        
+        return isProcessing;
     }
     
     /**
-     * Detect if there's new command output based on ⏺ symbol content changes
+     * Detect if Claude Code has finished processing
      */
     detectNewCommandOutput(agent) {
-        // Check FULL buffer for ⏺ symbol, not just last lines
-        const hasRecordSymbol = /⏺/.test(agent.outputBuffer);
+        // SUPER SIMPLE: Just check if "esc to interrupt" is gone
+        const isProcessing = this.isClaudeProcessing(agent.outputBuffer);
         
-        if (!hasRecordSymbol) {
-            // No symbol yet, continue waiting
-            return { hasNewOutput: false, reason: 'No ⏺ symbol found in buffer' };
+        logger.info(`Agent ${agent.id} processing check:`);
+        logger.info(`Has 'esc to interrupt': ${isProcessing}`);
+        logger.info(`Buffer size: ${agent.outputBuffer.length}`);
+        logger.info(`Last sent size: ${agent.lastSentBuffer ? agent.lastSentBuffer.length : 0}`);
+        
+        // Debug: Show a sample of the buffer to see what we're checking
+        if (agent.outputBuffer.length > 0) {
+            const bufferSample = agent.outputBuffer.substring(agent.outputBuffer.length - 500);
+            logger.debug(`Buffer tail (last 500 chars): ${bufferSample}`);
         }
         
-        // For content comparison, use last 30 lines
-        const current30Lines = agent.fullOutput.split('\n').slice(-30);
-        const currentText = current30Lines.join('\n');
-        
-        // Extract ALL content after LAST ⏺ symbol in buffer
-        const bufferSymbolContent = this.extractContentAfterSymbol(agent.outputBuffer);
-        const previousSymbolContent = agent.lastSymbolContent || '';
-        
-        // Check if content after ⏺ has changed
-        const contentChanged = bufferSymbolContent !== previousSymbolContent && bufferSymbolContent.length > 10;
-        const isStable = !this.containsProcessingIndicators(agent.outputBuffer);
-        
-        // Debug logging for content comparison
-        logger.info(`Agent ${agent.id} ⏺ symbol analysis:`);
-        logger.info(`Current content after ⏺: "${bufferSymbolContent.substring(0, 100)}..."`);
-        logger.info(`Previous content after ⏺: "${previousSymbolContent.substring(0, 100)}..."`);
-        logger.info(`Content changed: ${contentChanged}, Is stable: ${isStable}, Length: ${bufferSymbolContent.length}`);
-        
-        if (contentChanged) {
-            logger.info(`Agent ${agent.id} ⏺ CONTENT CHANGE DETECTED!`);
-        } else {
-            logger.info(`Agent ${agent.id} ⏺ content unchanged - no new output`);
-        }
-        
-        // Update tracking
-        agent.lastSymbolContent = bufferSymbolContent;
-        agent.previous30Lines = [...current30Lines];
-        agent.hasRecordSymbol = hasRecordSymbol;
-        
-        if (contentChanged && isStable && bufferSymbolContent.length > 0) {
-            return { 
-                hasNewOutput: true, 
-                reason: `New content after ⏺: ${bufferSymbolContent.substring(0, 50)}...`,
-                symbolContent: bufferSymbolContent 
-            };
+        // Send output when:
+        // 1. Claude is NOT processing (no "esc to interrupt")
+        // 2. We have substantial output (> 1000 chars)
+        // 3. Buffer is different from last sent
+        if (!isProcessing && agent.outputBuffer.length > 1000) {
+            // Check if this is new content
+            if (agent.outputBuffer !== agent.lastSentBuffer) {
+                logger.info(`Agent ${agent.id} READY TO SEND - Claude is done (no 'esc to interrupt')`);
+                agent.lastSentBuffer = agent.outputBuffer;
+                
+                return { 
+                    hasNewOutput: true, 
+                    reason: `Claude finished processing (${agent.outputBuffer.length} chars ready)`
+                };
+            } else {
+                logger.info(`Agent ${agent.id} Same content as before - not sending again`);
+            }
+        } else if (isProcessing) {
+            logger.info(`Agent ${agent.id} Claude still processing - 'esc to interrupt' present`);
+        } else if (agent.outputBuffer.length <= 1000) {
+            logger.info(`Agent ${agent.id} Buffer too small (${agent.outputBuffer.length} chars) - waiting for more`);
         }
         
         return { 
             hasNewOutput: false, 
-            reason: `No change - Content: "${bufferSymbolContent.substring(0, 30)}...", Changed: ${contentChanged}, Stable: ${isStable}` 
+            reason: isProcessing ? `Still processing` : `Waiting for more output` 
         };
     }
     
@@ -753,6 +758,29 @@ class ClaudeCodeManager extends EventEmitter {
             
             logger.info(`Agent ${agent.id}: ${detection.reason}`);
             
+            // TEMP: Skip AI filtering - just use simple detection
+            logger.info(`TEMP: Skipping AI filter - sending based on simple detection`);
+            
+            agent.conversationHistory.push({
+                type: 'claude',
+                content: agent.outputBuffer,
+                timestamp: Date.now()
+            });
+            
+            this.emit('agent-output', {
+                agentId: agent.id,
+                chatId: agent.chatId,
+                text: agent.outputBuffer
+            });
+            
+            // Clear buffer and update last sent output
+            agent.outputBuffer = '';
+            agent.lastSentOutput = currentLastLines;
+            agent.lastSentBuffer = ''; // Reset this too since buffer was cleared
+            agent.isCheckingOutput = false;
+            return;
+            
+            /* DISABLED AI FILTERING
             // If no AI service, send output directly
             if (!this.aiService) {
                 agent.conversationHistory.push({
@@ -800,9 +828,11 @@ class ClaudeCodeManager extends EventEmitter {
                 // Clear buffer and update last sent output
                 agent.outputBuffer = '';
                 agent.lastSentOutput = currentLastLines;
+                agent.lastSentBuffer = ''; // Reset this too since buffer was cleared
             } else {
                 logger.info(`AI filtered output for agent ${agent.id} - not ready to send. Last lines: ${currentLastLines.substring(0, 200)}`);
             }
+            */
             
         } catch (error) {
             logger.error(`Error in output filtering for agent ${agent.id}:`, error);
