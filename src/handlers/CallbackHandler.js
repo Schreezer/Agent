@@ -53,6 +53,14 @@ class CallbackHandler {
                     }
                     break;
                     
+                case 'cleanup_confirm':
+                    await this.handleCleanupConfirm(chatId);
+                    break;
+                    
+                case 'cleanup_cancel':
+                    await this.bot.sendMessage(chatId, '❌ File cleanup cancelled');
+                    break;
+                    
                 default:
                     if (action.startsWith('claude_')) {
                         // Extract chatId from callback data
@@ -73,6 +81,30 @@ class CallbackHandler {
         } catch (error) {
             logger.error('Error handling callback query:', error);
             await this.bot.sendMessage(chatId, '❌ Error processing your request');
+        }
+    }
+    
+    /**
+     * Handle cleanup confirmation
+     */
+    async handleCleanupConfirm(chatId) {
+        try {
+            const result = await this.sessionManager.deleteAllFiles(chatId);
+            const fileManager = this.sessionManager.getFileManager();
+            
+            if (result.deletedCount > 0) {
+                await this.bot.sendMessage(chatId,
+                    `✅ *Files cleaned up successfully!*\\n\\n` +
+                    `🗑️ Deleted: ${result.deletedCount} files\\n` +
+                    `💾 Freed: ${fileManager.formatFileSize(result.totalSize)}`,
+                    { parse_mode: 'Markdown' }
+                );
+            } else {
+                await this.bot.sendMessage(chatId, '📁 No files were found to delete');
+            }
+        } catch (error) {
+            logger.error('Error during cleanup:', error);
+            await this.bot.sendMessage(chatId, '❌ Failed to cleanup files');
         }
     }
 }

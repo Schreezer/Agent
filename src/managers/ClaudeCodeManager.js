@@ -178,6 +178,14 @@ class ClaudeCodeManager extends EventEmitter {
      * @param {string} task - Task description
      */
     async createAgent(chatId, taskId, task) {
+        // Enforce single session per chat - kill any existing agents for this chat
+        const existingAgents = Array.from(this.activeAgents.entries())
+            .filter(([agentId, agent]) => agent.chatId === chatId);
+        
+        for (const [agentId] of existingAgents) {
+            logger.info(`Killing existing agent ${agentId} for chat ${chatId} to enforce single session`);
+            await this.killAgent(agentId);
+        }
         const agent = {
             id: taskId,
             chatId,

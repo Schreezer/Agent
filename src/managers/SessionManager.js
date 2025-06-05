@@ -1,4 +1,5 @@
 const logger = require('../utils/logger');
+const FileManager = require('../utils/fileManager');
 
 /**
  * Manages all bot sessions (OpenRouter and Claude Code)
@@ -7,6 +8,7 @@ class SessionManager {
     constructor() {
         this.openRouterSessions = new Map();
         this.claudeAgentSessions = new Map();
+        this.fileManager = new FileManager();
     }
     
     /**
@@ -262,6 +264,79 @@ class SessionManager {
             }
         }
         return agents;
+    }
+    
+    /**
+     * File management methods
+     */
+    
+    /**
+     * Add uploaded file to chat
+     */
+    async addUploadedFile(chatId, fileInfo) {
+        try {
+            const savedFile = await this.fileManager.saveFile(chatId, fileInfo.filename, fileInfo.buffer);
+            logger.info(`File ${fileInfo.filename} added for chat ${chatId}`);
+            return savedFile;
+        } catch (error) {
+            logger.error(`Failed to add file for chat ${chatId}:`, error);
+            throw error;
+        }
+    }
+    
+    /**
+     * Get uploaded files for chat
+     */
+    async getUploadedFiles(chatId) {
+        try {
+            return await this.fileManager.listFiles(chatId);
+        } catch (error) {
+            logger.error(`Failed to get files for chat ${chatId}:`, error);
+            throw error;
+        }
+    }
+    
+    /**
+     * Delete specific file for chat
+     */
+    async deleteFile(chatId, filename) {
+        try {
+            return await this.fileManager.deleteFile(chatId, filename);
+        } catch (error) {
+            logger.error(`Failed to delete file ${filename} for chat ${chatId}:`, error);
+            throw error;
+        }
+    }
+    
+    /**
+     * Delete all files for chat
+     */
+    async deleteAllFiles(chatId) {
+        try {
+            return await this.fileManager.deleteAllFiles(chatId);
+        } catch (error) {
+            logger.error(`Failed to delete all files for chat ${chatId}:`, error);
+            throw error;
+        }
+    }
+    
+    /**
+     * Get storage usage for chat
+     */
+    async getChatStorageUsage(chatId) {
+        try {
+            return await this.fileManager.getChatStorageUsage(chatId);
+        } catch (error) {
+            logger.error(`Failed to get storage usage for chat ${chatId}:`, error);
+            throw error;
+        }
+    }
+    
+    /**
+     * Get file manager instance
+     */
+    getFileManager() {
+        return this.fileManager;
     }
 }
 

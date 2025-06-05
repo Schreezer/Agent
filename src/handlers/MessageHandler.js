@@ -1,4 +1,6 @@
 const logger = require('../utils/logger');
+const https = require('https');
+const http = require('http');
 
 /**
  * Handles all incoming Telegram messages
@@ -23,6 +25,12 @@ class MessageHandler {
         try {
             if (!this.isAuthorized(chatId)) {
                 await this.bot.sendMessage(chatId, '❌ Unauthorized access');
+                return;
+            }
+            
+            // Handle file uploads
+            if (msg.document || msg.photo || msg.audio || msg.video || msg.voice || msg.sticker) {
+                await this.handleFileUpload(msg);
                 return;
             }
             
@@ -123,6 +131,18 @@ class MessageHandler {
                 await this.handleNewCommand(chatId);
                 break;
                 
+            case '/files':
+                await this.handleFilesCommand(chatId);
+                break;
+                
+            case '/delete':
+                await this.handleDeleteCommand(msg);
+                break;
+                
+            case '/cleanup':
+                await this.handleCleanupCommand(chatId);
+                break;
+                
             default:
                 await this.bot.sendMessage(chatId, '❓ Unknown command');
         }
@@ -145,6 +165,9 @@ class MessageHandler {
             '**Commands:**\\n' +
             '• `/claude <task>` - Direct Claude Code access\\n' +
             '• `/status` - Check bot status\\n' +
+            '• `/files` - List uploaded files\\n' +
+            '• `/delete <filename>` - Delete specific file\\n' +
+            '• `/cleanup` - Delete all files\\n' +
             '• `/new` - Start fresh conversation\\n' +
             '• `/cancel` - Cancel current task',
             { parse_mode: 'Markdown' }
@@ -409,16 +432,29 @@ class MessageHandler {
             const taskId = `claude_${chatId}_${Date.now()}`;
             this.sessionManager.createClaudeAgentSession(taskId, chatId, task);
             
+            // Get uploaded files for context
+            const uploadedFiles = await this.sessionManager.getUploadedFiles(chatId);
+            let enhancedTask = task;
+            
+            if (uploadedFiles.length > 0) {
+                enhancedTask += '\n\nUploaded files available:\n';
+                uploadedFiles.forEach(file => {
+                    enhancedTask += `- ${file.filename} (${this.sessionManager.getFileManager().formatFileSize(file.size)}) at ${file.relativePath}\n`;
+                });
+                enhancedTask += '\nYou can access these files directly using their paths.';
+            }
+            
             await this.bot.sendMessage(chatId,
                 `🔧 *Using Claude Code for this task*\\n\\n` +
                 `📋 Task: ${task}\\n` +
-                `🤖 Agent ID: \`${taskId}\`\\n\\n` +
-                `_Claude Code has access to real-time data, file system, web APIs, and system commands..._`,
+                `🤖 Agent ID: \`${taskId}\`\\n` +
+                (uploadedFiles.length > 0 ? `📁 Files available: ${uploadedFiles.length}\\n` : '') +
+                `\\n_Claude Code has access to real-time data, file system, web APIs, and system commands..._`,
                 { parse_mode: 'Markdown' }
             );
             
-            // Pass user's original task directly to Claude Code
-            await this.claudeCodeManager.createAgent(chatId, taskId, task);
+            // Pass enhanced task with file context to Claude Code
+            await this.claudeCodeManager.createAgent(chatId, taskId, enhancedTask);
             
         } catch (error) {
             logger.error('Failed to start Claude agent:', error);
@@ -571,6 +607,244 @@ class MessageHandler {
     isAuthorized(chatId) {
         if (this.authorizedUsers.length === 0) return true;
         return this.authorizedUsers.includes(chatId.toString());
+    }
+    
+    /**
+     * Handle file uploads (documents, photos, etc.)
+     */
+    async handleFileUpload(msg) {
+        const chatId = msg.chat.id;
+        
+        try {
+            let fileInfo = null;
+            
+            // Determine file type and get file info
+            if (msg.document) {
+                fileInfo = {
+                    file_id: msg.document.file_id,
+                    filename: msg.document.file_name || 'document',
+                    size: msg.document.file_size,
+                    type: 'document'
+                };
+            } else if (msg.photo) {
+                // Use the largest photo size
+                const photo = msg.photo[msg.photo.length - 1];
+                fileInfo = {
+                    file_id: photo.file_id,
+                    filename: `photo_${Date.now()}.jpg`,
+                    size: photo.file_size || 0,
+                    type: 'photo'
+                };
+            } else if (msg.audio) {
+                fileInfo = {
+                    file_id: msg.audio.file_id,
+                    filename: msg.audio.file_name || `audio_${Date.now()}.mp3`,
+                    size: msg.audio.file_size,
+                    type: 'audio'
+                };
+            } else if (msg.video) {
+                fileInfo = {
+                    file_id: msg.video.file_id,
+                    filename: msg.video.file_name || `video_${Date.now()}.mp4`,
+                    size: msg.video.file_size,
+                    type: 'video'
+                };
+            } else if (msg.voice) {
+                fileInfo = {
+                    file_id: msg.voice.file_id,
+                    filename: `voice_${Date.now()}.ogg`,
+                    size: msg.voice.file_size,
+                    type: 'voice'
+                };
+            } else if (msg.sticker) {
+                fileInfo = {
+                    file_id: msg.sticker.file_id,
+                    filename: `sticker_${Date.now()}.webp`,
+                    size: msg.sticker.file_size || 0,
+                    type: 'sticker'
+                };
+            }
+            
+            if (!fileInfo) {
+                await this.bot.sendMessage(chatId, '❌ Unsupported file type');
+                return;
+            }
+            
+            // Download file from Telegram
+            const processingMsg = await this.bot.sendMessage(chatId, 
+                `📥 Downloading ${fileInfo.filename}...`
+            );
+            
+            const fileBuffer = await this.downloadTelegramFile(fileInfo.file_id);
+            
+            // Save file
+            const savedFile = await this.sessionManager.addUploadedFile(chatId, {
+                filename: fileInfo.filename,
+                buffer: fileBuffer
+            });
+            
+            // Delete processing message
+            try {
+                await this.bot.deleteMessage(chatId, processingMsg.message_id);
+            } catch (e) {
+                // Ignore deletion errors
+            }
+            
+            await this.bot.sendMessage(chatId,
+                `✅ *File uploaded successfully!*\\n\\n` +
+                `📁 **${savedFile.filename}**\\n` +
+                `📊 Size: ${this.sessionManager.getFileManager().formatFileSize(savedFile.size)}\\n` +
+                `📍 Path: \`${savedFile.relativePath}\`\\n\\n` +
+                `_File is now available for Claude Code tasks!_`,
+                { parse_mode: 'Markdown' }
+            );
+            
+        } catch (error) {
+            logger.error('Error handling file upload:', error);
+            await this.bot.sendMessage(chatId, 
+                `❌ Failed to upload file: ${error.message}`
+            );
+        }
+    }
+    
+    /**
+     * Download file from Telegram
+     */
+    async downloadTelegramFile(fileId) {
+        try {
+            const file = await this.bot.getFile(fileId);
+            const fileUrl = `https://api.telegram.org/file/bot${this.config.telegramBotToken}/${file.file_path}`;
+            
+            return new Promise((resolve, reject) => {
+                const client = fileUrl.startsWith('https:') ? https : http;
+                
+                client.get(fileUrl, (response) => {
+                    if (response.statusCode !== 200) {
+                        reject(new Error(`HTTP ${response.statusCode}: ${response.statusMessage}`));
+                        return;
+                    }
+                    
+                    const chunks = [];
+                    response.on('data', (chunk) => chunks.push(chunk));
+                    response.on('end', () => resolve(Buffer.concat(chunks)));
+                    response.on('error', reject);
+                }).on('error', reject);
+            });
+        } catch (error) {
+            logger.error('Error downloading file from Telegram:', error);
+            throw error;
+        }
+    }
+    
+    /**
+     * Handle /files command
+     */
+    async handleFilesCommand(chatId) {
+        try {
+            const files = await this.sessionManager.getUploadedFiles(chatId);
+            const fileManager = this.sessionManager.getFileManager();
+            
+            if (files.length === 0) {
+                await this.bot.sendMessage(chatId,
+                    '📁 *No files uploaded*\\n\\n' +
+                    'Upload files by sending documents, photos, audio, or videos to this chat.',
+                    { parse_mode: 'Markdown' }
+                );
+                return;
+            }
+            
+            const totalSize = files.reduce((sum, file) => sum + file.size, 0);
+            
+            let message = `📁 *Uploaded Files (${files.length})*\\n` +
+                         `💾 Total size: ${fileManager.formatFileSize(totalSize)}\\n\\n`;
+            
+            files.forEach((file, index) => {
+                message += `${index + 1}\\. **${file.filename}**\\n`;
+                message += `   📊 ${fileManager.formatFileSize(file.size)}\\n`;
+                message += `   📅 ${fileManager.formatDate(file.uploadTime)}\\n`;
+                message += `   📍 \`${file.relativePath}\`\\n\\n`;
+            });
+            
+            message += '_Use `/delete <filename>` to remove a specific file_\\n';
+            message += '_Use `/cleanup` to remove all files_';
+            
+            await this.bot.sendMessage(chatId, message, { parse_mode: 'Markdown' });
+            
+        } catch (error) {
+            logger.error('Error handling /files command:', error);
+            await this.bot.sendMessage(chatId, '❌ Failed to list files');
+        }
+    }
+    
+    /**
+     * Handle /delete command
+     */
+    async handleDeleteCommand(msg) {
+        const chatId = msg.chat.id;
+        const args = msg.text.split(' ').slice(1).join(' ');
+        
+        if (!args) {
+            await this.bot.sendMessage(chatId,
+                '💡 *Delete File*\\n\\n' +
+                'Usage: `/delete <filename>`\\n\\n' +
+                'Example: `/delete document.pdf`\\n\\n' +
+                'Use `/files` to see available files.',
+                { parse_mode: 'Markdown' }
+            );
+            return;
+        }
+        
+        try {
+            const deletedFile = await this.sessionManager.deleteFile(chatId, args);
+            const fileManager = this.sessionManager.getFileManager();
+            
+            await this.bot.sendMessage(chatId,
+                `✅ *File deleted successfully!*\\n\\n` +
+                `📁 **${deletedFile.filename}**\\n` +
+                `💾 Freed: ${fileManager.formatFileSize(deletedFile.size)}`,
+                { parse_mode: 'Markdown' }
+            );
+            
+        } catch (error) {
+            logger.error('Error deleting file:', error);
+            await this.bot.sendMessage(chatId, `❌ ${error.message}`);
+        }
+    }
+    
+    /**
+     * Handle /cleanup command
+     */
+    async handleCleanupCommand(chatId) {
+        try {
+            const files = await this.sessionManager.getUploadedFiles(chatId);
+            
+            if (files.length === 0) {
+                await this.bot.sendMessage(chatId, '📁 No files to clean up');
+                return;
+            }
+            
+            const fileManager = this.sessionManager.getFileManager();
+            const totalSize = files.reduce((sum, file) => sum + file.size, 0);
+            
+            await this.bot.sendMessage(chatId,
+                `⚠️ *Confirm file cleanup*\\n\\n` +
+                `This will delete **${files.length} files** (${fileManager.formatFileSize(totalSize)})\\n\\n` +
+                `Are you sure?`,
+                {
+                    parse_mode: 'Markdown',
+                    reply_markup: {
+                        inline_keyboard: [[
+                            { text: '✅ Yes, delete all', callback_data: 'cleanup_confirm' },
+                            { text: '❌ Cancel', callback_data: 'cleanup_cancel' }
+                        ]]
+                    }
+                }
+            );
+            
+        } catch (error) {
+            logger.error('Error handling /cleanup command:', error);
+            await this.bot.sendMessage(chatId, '❌ Failed to prepare cleanup');
+        }
     }
 }
 
