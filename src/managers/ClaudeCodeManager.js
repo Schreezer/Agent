@@ -198,7 +198,11 @@ class ClaudeCodeManager extends EventEmitter {
                 type: 'user',
                 content: task,
                 timestamp: Date.now()
-            }] // Track full conversation flow
+            }], // Track full conversation flow
+            // Smart ⏺ symbol detection
+            lastSymbolContent: '', // Content after last ⏺ symbol
+            previous30Lines: [], // For comparison
+            hasRecordSymbol: false // Track ⏺ presence
         };
         
         this.activeAgents.set(taskId, agent);
@@ -250,8 +254,14 @@ class ClaudeCodeManager extends EventEmitter {
                 const lines = agent.fullOutput.split('\n');
                 agent.lastLines = lines.slice(-10).filter(line => line.trim());
                 
-                logger.info(`Agent ${agent.id} PTY output (${output.length} chars):`, output.slice(0, 200));
-                logger.info(`Agent ${agent.id} buffer size: ${agent.outputBuffer.length}, last lines count: ${agent.lastLines.length}`);
+                // Check for ⏺ symbol in new output
+                const hasSymbol = output.includes('⏺');
+                if (hasSymbol) {
+                    logger.info(`Agent ${agent.id} ⏺ SYMBOL DETECTED in new output!`);
+                }
+                
+                logger.debug(`Agent ${agent.id} PTY output (${output.length} chars):`, output.slice(0, 200));
+                logger.debug(`Agent ${agent.id} buffer size: ${agent.outputBuffer.length}, last lines count: ${agent.lastLines.length}`);
                 
                 // Start/restart timer for intelligent output checking
                 this.scheduleOutputCheck(agent);
@@ -586,6 +596,72 @@ class ClaudeCodeManager extends EventEmitter {
     }
     
     /**
+     * Extract content after ⏺ symbol from text
+     */
+    extractContentAfterSymbol(text) {
+        const symbolMatch = text.match(/⏺(.*)$/ms);
+        return symbolMatch ? symbolMatch[1].trim() : '';
+    }
+    
+    /**
+     * Check if there are processing indicators (ANSI escapes, loading)
+     */
+    containsProcessingIndicators(text) {
+        return /\[2K\[1A\[2K/.test(text) || 
+               /\x1b\[/.test(text) ||
+               /Loading|Processing|Waiting/i.test(text);
+    }
+    
+    /**
+     * Detect if there's new command output based on ⏺ symbol content changes
+     */
+    detectNewCommandOutput(agent) {
+        const current30Lines = agent.fullOutput.split('\n').slice(-30);
+        const currentText = current30Lines.join('\n');
+        
+        // Check for ⏺ symbol presence
+        const hasRecordSymbol = /⏺/.test(currentText);
+        
+        if (!hasRecordSymbol) {
+            // No symbol yet, continue waiting
+            return { hasNewOutput: false, reason: 'No ⏺ symbol found' };
+        }
+        
+        // Extract content after ⏺ symbol
+        const currentSymbolContent = this.extractContentAfterSymbol(currentText);
+        const previousSymbolContent = agent.lastSymbolContent || '';
+        
+        // Check if content after ⏺ has changed
+        const contentChanged = currentSymbolContent !== previousSymbolContent;
+        const isStable = !this.containsProcessingIndicators(currentText);
+        
+        // Debug logging for content comparison
+        if (currentSymbolContent !== previousSymbolContent) {
+            logger.info(`Agent ${agent.id} ⏺ content change detected:`);
+            logger.info(`Previous: "${previousSymbolContent.substring(0, 100)}..."`);
+            logger.info(`Current:  "${currentSymbolContent.substring(0, 100)}..."`);
+        }
+        
+        // Update tracking
+        agent.lastSymbolContent = currentSymbolContent;
+        agent.previous30Lines = [...current30Lines];
+        agent.hasRecordSymbol = hasRecordSymbol;
+        
+        if (contentChanged && isStable && currentSymbolContent.length > 0) {
+            return { 
+                hasNewOutput: true, 
+                reason: `New content after ⏺: ${currentSymbolContent.substring(0, 50)}...`,
+                symbolContent: currentSymbolContent 
+            };
+        }
+        
+        return { 
+            hasNewOutput: false, 
+            reason: `No change - Content: "${currentSymbolContent.substring(0, 30)}...", Changed: ${contentChanged}, Stable: ${isStable}` 
+        };
+    }
+    
+    /**
      * Schedule intelligent output check with debouncing
      */
     scheduleOutputCheck(agent) {
@@ -595,7 +671,7 @@ class ClaudeCodeManager extends EventEmitter {
             agent.outputCheckTimer = setInterval(() => {
                 logger.info(`Running scheduled output check for agent ${agent.id}`);
                 this.checkAndSendOutput(agent);
-            }, 3000); // Check every 3 seconds for debugging
+            }, 5000); // Check every 5 seconds - less frequent since we're smarter now
             
             logger.info(`Started output check interval for agent ${agent.id}`);
         } else {
@@ -630,33 +706,31 @@ class ClaudeCodeManager extends EventEmitter {
                 return;
             }
             
-            // TEMPORARY: Always send output for debugging
-            logger.info(`TEMP DEBUG: Sending all output for agent ${agent.id}`);
+            // Smart ⏺ symbol detection - only process when content after symbol changes
+            const detection = this.detectNewCommandOutput(agent);
             
-            agent.conversationHistory.push({
-                type: 'claude',
-                content: agent.outputBuffer,
-                timestamp: Date.now()
-            });
+            if (!detection.hasNewOutput) {
+                logger.debug(`Agent ${agent.id}: ${detection.reason}`);
+                agent.isCheckingOutput = false;
+                return;
+            }
             
-            this.emit('agent-output', {
-                agentId: agent.id,
-                chatId: agent.chatId,
-                text: agent.outputBuffer
-            });
+            logger.info(`Agent ${agent.id}: ${detection.reason}`);
             
-            agent.outputBuffer = '';
-            agent.lastSentOutput = currentLastLines;
-            agent.isCheckingOutput = false;
-            return;
-            
-            // If no AI service, fallback to original behavior
+            // If no AI service, send output directly
             if (!this.aiService) {
+                agent.conversationHistory.push({
+                    type: 'claude',
+                    content: agent.outputBuffer,
+                    timestamp: Date.now()
+                });
+                
                 this.emit('agent-output', {
                     agentId: agent.id,
                     chatId: agent.chatId,
                     text: agent.outputBuffer
                 });
+                
                 agent.outputBuffer = '';
                 agent.lastSentOutput = currentLastLines;
                 agent.isCheckingOutput = false;
