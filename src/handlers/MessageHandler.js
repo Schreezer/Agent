@@ -525,8 +525,9 @@ class MessageHandler {
         cleaned = cleaned.replace(/\x1b\[[\d;]*[A-Za-z]/g, '');
         cleaned = cleaned.replace(/\[(\d+[A-Z]|\?[0-9]+[a-z])/g, '');
         
-        // Clean up problematic markdown characters for Telegram
-        cleaned = cleaned.replace(/[_*`[\]()~>+\-#|{}]/g, function(match) {
+        // Selectively escape only truly problematic Telegram markdown characters
+        // Keep dashes, hashes, and other formatting characters for readability
+        cleaned = cleaned.replace(/[_*`[\]()~]/g, function(match) {
             return '\\' + match;
         });
         
