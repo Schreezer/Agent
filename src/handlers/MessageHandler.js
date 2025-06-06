@@ -6,12 +6,13 @@ const http = require('http');
  * Handles all incoming Telegram messages
  */
 class MessageHandler {
-    constructor(bot, sessionManager, claudeCodeManager, config) {
+    constructor(bot, sessionManager, claudeCodeManager, config, outputCleanerService = null) {
         this.bot = bot;
         this.sessionManager = sessionManager;
         this.claudeCodeManager = claudeCodeManager;
         this.config = config;
         this.authorizedUsers = config.authorizedUsers;
+        this.outputCleanerService = outputCleanerService;
     }
     
     /**
@@ -42,6 +43,9 @@ class MessageHandler {
                     waitingForUserResponse: false
                 });
                 
+                // Add user response to conversation history
+                this.sessionManager.addToConversationHistory(chatId, 'user', text);
+                
                 // Send user's response directly to Claude Code (no AI interpretation needed)
                 await this.claudeCodeManager.sendCommand(claudeSession.agentId, text);
                 return;
@@ -64,6 +68,9 @@ class MessageHandler {
                     { parse_mode: 'Markdown' }
                 );
                 
+                // Add follow-up message to conversation history
+                this.sessionManager.addToConversationHistory(chatId, 'user', text);
+                
                 // Send the user's message directly to Claude Code
                 await this.claudeCodeManager.sendCommand(latestAgent.agentId, text);
                 return;
@@ -71,6 +78,8 @@ class MessageHandler {
             
             // Route all text messages directly to Claude Code (bypassing OpenRouter)
             if (text && text.trim().length > 0) {
+                // Add user message to conversation history
+                this.sessionManager.addToConversationHistory(chatId, 'user', text);
                 await this.startClaudeAgent(chatId, text);
             }
         } catch (error) {
@@ -231,6 +240,9 @@ class MessageHandler {
      * Handle /new command - start fresh conversation
      */
     async handleNewCommand(chatId) {
+        // Clear conversation history for LLM cleaning context
+        this.sessionManager.clearConversationHistory(chatId);
+        
         // Clear all active sessions for this chat
         const cleared = this.sessionManager.clearAllSessionsForChat(chatId);
         
@@ -385,6 +397,9 @@ class MessageHandler {
             const taskId = `claude_${chatId}_${Date.now()}`;
             this.sessionManager.createClaudeAgentSession(taskId, chatId, task);
             
+            // Initialize conversation history with the user's task
+            this.sessionManager.addToConversationHistory(chatId, 'user', task);
+            
             // Get uploaded files for context
             const uploadedFiles = await this.sessionManager.getUploadedFiles(chatId);
             let enhancedTask = task;
@@ -416,6 +431,43 @@ class MessageHandler {
         }
     }
     
+    /**
+     * Send long message with LLM cleaning (split if needed)
+     */
+    async sendLongMessageWithCleaning(chatId, text, conversationHistory = []) {
+        try {
+            let finalText = text;
+            
+            // Use LLM cleaning if service is available and enabled
+            if (this.outputCleanerService && this.outputCleanerService.isEnabled()) {
+                finalText = await this.outputCleanerService.cleanOutput(text, conversationHistory, chatId);
+                
+                // If LLM returns empty string, skip sending (it was deemed noise)
+                if (!finalText || finalText.trim().length === 0) {
+                    logger.info(`LLM filtered out output for chat ${chatId} - deemed noise/unnecessary`);
+                    return;
+                }
+            } else {
+                // Fallback to basic cleaning if LLM service not available
+                finalText = this.cleanClaudeCodeOutput(text);
+                if (!finalText || finalText.trim().length === 0) {
+                    return;
+                }
+            }
+            
+            // Send the cleaned text
+            await this.sendLongMessage(chatId, finalText);
+            
+        } catch (error) {
+            logger.error('Error in LLM cleaning, falling back to basic cleaning:', error);
+            // Fallback to basic cleaning
+            const fallbackText = this.cleanClaudeCodeOutput(text);
+            if (fallbackText && fallbackText.trim().length > 0) {
+                await this.sendLongMessage(chatId, fallbackText);
+            }
+        }
+    }
+
     /**
      * Send long message (split if needed)
      */

@@ -23,7 +23,8 @@ class SessionManager {
             startTime: Date.now(),
             messages: [],
             waitingForUserResponse: false,
-            lastActivity: Date.now()
+            lastActivity: Date.now(),
+            conversationHistory: [] // Track full conversation for LLM cleaning
         };
         
         this.claudeAgentSessions.set(agentId, session);
@@ -263,6 +264,65 @@ class SessionManager {
      */
     getFileManager() {
         return this.fileManager;
+    }
+
+    /**
+     * Add message to conversation history for LLM cleaning context
+     * @param {string} chatId - Telegram chat ID
+     * @param {string} type - 'user' or 'claude'
+     * @param {string} content - Message content
+     */
+    addToConversationHistory(chatId, type, content) {
+        // Find the most recent Claude agent session for this chat
+        const agents = this.getAllClaudeAgentSessionsForChat(chatId);
+        if (agents.length > 0) {
+            const latestAgent = agents[agents.length - 1];
+            const session = this.getClaudeAgentSession(latestAgent.agentId);
+            if (session) {
+                session.conversationHistory.push({
+                    type,
+                    content,
+                    timestamp: Date.now()
+                });
+                
+                // Limit history to last 20 messages to avoid memory bloat
+                if (session.conversationHistory.length > 20) {
+                    session.conversationHistory = session.conversationHistory.slice(-20);
+                }
+                
+                logger.debug(`Added ${type} message to conversation history for chat ${chatId}`);
+            }
+        }
+    }
+
+    /**
+     * Get conversation history for a chat (from most recent session)
+     * @param {string} chatId - Telegram chat ID
+     * @returns {Array} Conversation history
+     */
+    getConversationHistory(chatId) {
+        const agents = this.getAllClaudeAgentSessionsForChat(chatId);
+        if (agents.length > 0) {
+            const latestAgent = agents[agents.length - 1];
+            const session = this.getClaudeAgentSession(latestAgent.agentId);
+            return session ? session.conversationHistory : [];
+        }
+        return [];
+    }
+
+    /**
+     * Clear conversation history for a chat (called on /new)
+     * @param {string} chatId - Telegram chat ID
+     */
+    clearConversationHistory(chatId) {
+        const agents = this.getAllClaudeAgentSessionsForChat(chatId);
+        for (const agent of agents) {
+            const session = this.getClaudeAgentSession(agent.agentId);
+            if (session) {
+                session.conversationHistory = [];
+            }
+        }
+        logger.info(`Cleared conversation history for chat ${chatId}`);
     }
 }
 

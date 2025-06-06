@@ -6,6 +6,7 @@ const SessionManager = require('./managers/SessionManager');
 const ClaudeCodeManager = require('./managers/ClaudeCodeManager');
 const MessageHandler = require('./handlers/MessageHandler');
 const CallbackHandler = require('./handlers/CallbackHandler');
+const OutputCleanerService = require('./services/OutputCleanerService');
 const logger = require('./utils/logger');
 
 /**
@@ -24,13 +25,15 @@ class OpenRouterClaudeBot {
         // Initialize managers and services
         this.sessionManager = new SessionManager();
         this.claudeCodeManager = new ClaudeCodeManager();
+        this.outputCleanerService = new OutputCleanerService(this.config);
         
         // Initialize handlers
         this.messageHandler = new MessageHandler(
             this.bot,
             this.sessionManager,
             this.claudeCodeManager,
-            this.config
+            this.config,
+            this.outputCleanerService
         );
         
         this.callbackHandler = new CallbackHandler(
@@ -136,8 +139,15 @@ class OpenRouterClaudeBot {
         
         this.claudeCodeManager.on('agent-output', async ({ agentId, chatId, text }) => {
             try {
-                // Send Claude Code output directly to user
-                await this.messageHandler.sendLongMessage(chatId, text);
+                // Get conversation history for context
+                const conversationHistory = this.sessionManager.getConversationHistory(chatId);
+                
+                // Add this Claude output to conversation history
+                this.sessionManager.addToConversationHistory(chatId, 'claude', text);
+                
+                // Clean output using LLM with conversation context
+                await this.messageHandler.sendLongMessageWithCleaning(chatId, text, conversationHistory);
+                
             } catch (error) {
                 logger.error('Error sending agent output to user:', error);
             }
