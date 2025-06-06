@@ -93,9 +93,9 @@ class MessageHandler {
                 return;
             }
             
-            // Start new task if no active Claude sessions
+            // Route all text messages directly to Claude Code (bypassing OpenRouter)
             if (text && text.trim().length > 0) {
-                await this.startNewTask(chatId, text);
+                await this.startClaudeAgent(chatId, text);
             }
         } catch (error) {
             logger.error('Error handling message:', error);
@@ -153,23 +153,25 @@ class MessageHandler {
      */
     async handleStartCommand(chatId) {
         await this.bot.sendMessage(chatId,
-            '🤖 *OpenRouter + Claude Code Bot*\\n\\n' +
-            'Intelligent task execution with seamless Claude Code integration!\\n\\n' +
-            `🧠 Main Model: \`${this.config.mainModel}\`\\n` +
-            `🔍 Detection Model: \`${this.config.detectionModel}\`\\n\\n` +
+            '🤖 *Claude Code Telegram Bot*\\n\\n' +
+            'Direct access to Claude Code with all its powerful capabilities!\\n\\n' +
             '**How it works:**\\n' +
-            '• Send any task in natural language\\n' +
-            '• AI automatically uses Claude Code for complex tasks\\n' +
-            '• Your exact message is passed to Claude Code\\n' +
+            '• Send any task or question in natural language\\n' +
+            '• Everything goes directly to Claude Code\\n' +
+            '• Claude Code has access to files, web, system commands, and more\\n' +
             '• No permission prompts - seamless execution\\n\\n' +
             '**Commands:**\\n' +
-            '• `/claude <task>` - Direct Claude Code access\\n' +
+            '• `/claude <task>` - Direct Claude Code access (same as regular messages)\\n' +
             '• `/status` - Check bot status\\n' +
             '• `/files` - List uploaded files\\n' +
             '• `/delete <filename>` - Delete specific file\\n' +
             '• `/cleanup` - Delete all files\\n' +
             '• `/new` - Start fresh conversation\\n' +
-            '• `/cancel` - Cancel current task',
+            '• `/cancel` - Cancel current task\\n\\n' +
+            '**Examples:**\\n' +
+            '• "Hi, how are you?" - Claude Code handles conversations\\n' +
+            '• "Fix the bugs in my code" - Technical tasks\\n' +
+            '• "What\'s the weather like?" - Web searches and real-time data',
             { parse_mode: 'Markdown' }
         );
     }
@@ -180,13 +182,12 @@ class MessageHandler {
     async handleCancelCommand(chatId) {
         const cleared = this.sessionManager.clearAllSessionsForChat(chatId);
         
-        if (cleared.openRouterDeleted || cleared.claudeAgentsDeleted > 0) {
+        if (cleared.claudeAgentsDeleted > 0) {
             await this.bot.sendMessage(chatId, 
-                `❌ Cancelled ${cleared.openRouterDeleted ? 'OpenRouter task' : ''} ` +
-                `${cleared.claudeAgentsDeleted > 0 ? `${cleared.claudeAgentsDeleted} Claude agent(s)` : ''}`
+                `❌ Cancelled ${cleared.claudeAgentsDeleted} Claude Code session(s)`
             );
         } else {
-            await this.bot.sendMessage(chatId, 'No active tasks to cancel');
+            await this.bot.sendMessage(chatId, 'No active Claude Code sessions to cancel');
         }
     }
     
@@ -200,15 +201,14 @@ class MessageHandler {
         await this.bot.sendMessage(chatId,
             `📊 *Bot Status*\\n\\n` +
             `**Your Sessions:**\\n` +
-            `• OpenRouter: ${sessionStatus.hasOpenRouter ? '🟢 Active' : '⚪ None'}\\n` +
-            `• Claude Agents: ${sessionStatus.hasClaudeAgent ? '🟢 Active' : '⚪ None'}\\n\\n` +
+            `• Claude Code: ${sessionStatus.hasClaudeAgent ? '🟢 Active' : '⚪ None'}\\n\\n` +
             `**Global Stats:**\\n` +
-            `• OpenRouter Tasks: ${globalStats.openRouter.total}\\n` +
-            `• Claude Agents: ${globalStats.claudeAgents.total}\\n` +
+            `• Total Claude Sessions: ${globalStats.claudeAgents.total}\\n` +
             `• Claude Auth: ${this.claudeCodeManager.isAuthenticated ? '✅' : '❌'}\\n\\n` +
-            `**Models:**\\n` +
-            `• Main: \`${this.config.mainModel}\`\\n` +
-            `• Detection: \`${this.config.detectionModel}\``,
+            `**Architecture:**\\n` +
+            `• Direct Claude Code routing (OpenRouter bypassed)\\n` +
+            `• All messages → Claude Code\\n` +
+            `• Simplified, faster responses`,
             { parse_mode: 'Markdown' }
         );
     }
@@ -222,9 +222,12 @@ class MessageHandler {
         
         if (!args) {
             await this.bot.sendMessage(chatId,
-                '💡 *Claude Code Direct Mode*\\n\\n' +
+                '💡 *Claude Code Command*\\n\\n' +
                 'Usage: `/claude <task>`\\n\\n' +
-                'Example: `/claude fix the type errors in auth module`',
+                '**Note:** This command does the same as sending a regular message.\\n' +
+                'All messages now go directly to Claude Code!\\n\\n' +
+                'Example: `/claude fix the type errors in auth module`\\n' +
+                'Same as: `fix the type errors in auth module`',
                 { parse_mode: 'Markdown' }
             );
         } else {
@@ -247,19 +250,13 @@ class MessageHandler {
         
         let statusMessage = '🔄 *New conversation started!*\\n\\n';
         
-        if (cleared.openRouterDeleted || cleared.claudeAgentsDeleted > 0) {
+        if (cleared.claudeAgentsDeleted > 0) {
             statusMessage += '**Cleared:**\\n';
-            if (cleared.openRouterDeleted) {
-                statusMessage += `• OpenRouter session\\n`;
-            }
-            if (cleared.claudeAgentsDeleted > 0) {
-                statusMessage += `• ${cleared.claudeAgentsDeleted} Claude Code session(s)\\n`;
-            }
-            statusMessage += '\\n';
+            statusMessage += `• ${cleared.claudeAgentsDeleted} Claude Code session(s)\\n\\n`;
         }
         
         statusMessage += '**Ready for new tasks!**\\n' +
-                        'Send any request and I\'ll analyze and execute it intelligently.';
+                        'Send any message and Claude Code will handle it directly.';
         
         await this.bot.sendMessage(chatId, statusMessage, { parse_mode: 'Markdown' });
     }
