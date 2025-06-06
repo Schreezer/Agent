@@ -441,14 +441,13 @@ class MessageHandler {
                 enhancedTask += '\nYou can access these files directly using their paths.';
             }
             
-            await this.bot.sendMessage(chatId,
-                `🔧 *Using Claude Code for this task*\\n\\n` +
-                `📋 Task: ${task}\\n` +
-                `🤖 Agent ID: \`${taskId}\`\\n` +
-                (uploadedFiles.length > 0 ? `📁 Files available: ${uploadedFiles.length}\\n` : '') +
-                `\\n_Claude Code has access to real-time data, file system, web APIs, and system commands..._`,
-                { parse_mode: 'Markdown' }
-            );
+            // Optional: Show brief status only if files are available
+            if (uploadedFiles.length > 0) {
+                await this.bot.sendMessage(chatId,
+                    `📁 ${uploadedFiles.length} uploaded file(s) available for Claude Code`,
+                    { parse_mode: 'Markdown' }
+                );
+            }
             
             // Pass enhanced task with file context to Claude Code
             await this.claudeCodeManager.createAgent(chatId, taskId, enhancedTask);
@@ -547,6 +546,12 @@ class MessageHandler {
                    !trimmed.includes('Bypassing Permissions') &&
                    !trimmed.includes('Loading') &&
                    !trimmed.match(/^Welcome to Claude/) &&
+                   !trimmed.match(/^✻ Welcome to Claude Code/) && // Skip welcome screen
+                   !trimmed.includes('/help for help') && // Skip help instructions
+                   !trimmed.includes('/status for your current setup') && // Skip setup instructions
+                   !trimmed.match(/^cwd: \//) && // Skip current working directory
+                   !trimmed.match(/^>\s*Try "/) && // Skip suggestion prompts like "> Try 'refactor...'"
+                   !trimmed.match(/^>\s+/) && // Skip user input echo lines that start with "> "
                    !trimmed.match(/^✢.*Accomplishing.*/) && // Skip progress indicators
                    !trimmed.match(/^\\\(.*·.*tokens.*\\\)/) && // Skip token counters
                    !trimmed.match(/^\\>$/) && // Skip lone prompt symbols
