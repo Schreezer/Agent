@@ -634,10 +634,41 @@ class ClaudeCodeManager extends EventEmitter {
     }
     
     /**
+     * Normalize buffer content for comparison by removing processing animations
+     */
+    normalizeBufferContent(buffer) {
+        if (!buffer) return '';
+        
+        // Remove processing indicators that change during animations:
+        // 1. ⏺ symbols with surrounding content that may appear/disappear
+        // 2. Processing timers like "(5s ·" or "(12s ·"
+        // 3. "esc to interrupt" prompts
+        // 4. Cursor/animation artifacts
+        
+        let normalized = buffer
+            // Remove ⏺ symbol lines entirely (they're just processing indicators)
+            .replace(/^.*⏺.*$/gm, '')
+            // Remove "esc to interrupt" lines
+            .replace(/^.*esc\s+to\s+interrupt.*$/gmi, '')
+            // Remove processing timer patterns like "(5s ·" 
+            .replace(/\(\d+s\s*·[^)]*\)/g, '')
+            // Remove other processing artifacts like ✻ and ⎿
+            .replace(/[✻⎿]\s*/g, '')
+            // Remove ANSI escape sequences that might be in terminal output
+            .replace(/\x1b\[[0-9;]*m/g, '')
+            // Remove cursor position sequences
+            .replace(/\x1b\[[0-9;]*[HfABCD]/g, '')
+            // Normalize whitespace (multiple spaces/tabs/newlines to single space)
+            .replace(/\s+/g, ' ')
+            .trim();
+            
+        return normalized;
+    }
+
+    /**
      * Detect if Claude Code has finished processing
      */
     detectNewCommandOutput(agent) {
-        // SUPER SIMPLE: Just check if "esc to interrupt" is gone
         const isProcessing = this.isClaudeProcessing(agent.outputBuffer);
         
         logger.info(`Agent ${agent.id} processing check:`);
@@ -654,18 +685,27 @@ class ClaudeCodeManager extends EventEmitter {
         // Send output when:
         // 1. Claude is NOT processing (no "esc to interrupt")
         // 2. We have substantial output (> 1000 chars)
-        // 3. Buffer is different from last sent
+        // 3. Normalized content is meaningfully different from last sent
         if (!isProcessing && agent.outputBuffer.length > 1000) {
-            // Check if this is new content
-            if (agent.outputBuffer !== agent.lastSentBuffer) {
-                logger.info(`Agent ${agent.id} READY TO SEND - Claude is done (no 'esc to interrupt')`);
+            // Normalize both current and last sent content to ignore animation changes
+            const currentNormalized = this.normalizeBufferContent(agent.outputBuffer);
+            const lastSentNormalized = this.normalizeBufferContent(agent.lastSentBuffer || '');
+            
+            // Check if meaningful content has changed (not just ⏺ symbol animations)
+            const contentLengthDiff = Math.abs(currentNormalized.length - lastSentNormalized.length);
+            const hasNewMeaningfulContent = currentNormalized !== lastSentNormalized && contentLengthDiff > 50;
+            
+            if (hasNewMeaningfulContent) {
+                logger.info(`Agent ${agent.id} READY TO SEND - Claude is done with NEW meaningful content`);
+                logger.debug(`Normalized content length diff: ${contentLengthDiff} chars`);
                 
                 return { 
                     hasNewOutput: true, 
-                    reason: `Claude finished processing (${agent.outputBuffer.length} chars ready)`
+                    reason: `Claude finished processing with new content (${contentLengthDiff} new chars)`
                 };
             } else {
-                logger.info(`Agent ${agent.id} Same content as before - not sending again`);
+                logger.info(`Agent ${agent.id} Same meaningful content - ignoring ⏺ symbol animation changes`);
+                logger.debug(`Normalized lengths: current=${currentNormalized.length}, last=${lastSentNormalized.length}, diff=${contentLengthDiff}`);
             }
         } else if (isProcessing) {
             logger.info(`Agent ${agent.id} Claude still processing - 'esc to interrupt' present`);
