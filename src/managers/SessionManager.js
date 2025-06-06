@@ -2,62 +2,12 @@ const logger = require('../utils/logger');
 const FileManager = require('../utils/fileManager');
 
 /**
- * Manages all bot sessions (OpenRouter and Claude Code)
+ * Manages Claude Code sessions and file uploads
  */
 class SessionManager {
     constructor() {
-        this.openRouterSessions = new Map();
         this.claudeAgentSessions = new Map();
         this.fileManager = new FileManager();
-    }
-    
-    /**
-     * Create a new OpenRouter session
-     */
-    createOpenRouterSession(chatId, task) {
-        const session = {
-            task,
-            messages: [],
-            waitingForResponse: false,
-            waitingForAuth: false,
-            pendingClaudeTask: null,
-            startTime: Date.now(),
-            interactions: 0,
-            detectionChecks: 0
-        };
-        
-        this.openRouterSessions.set(chatId, session);
-        logger.info(`Created OpenRouter session for chat ${chatId}`);
-        return session;
-    }
-    
-    /**
-     * Get OpenRouter session
-     */
-    getOpenRouterSession(chatId) {
-        return this.openRouterSessions.get(chatId);
-    }
-    
-    /**
-     * Update OpenRouter session
-     */
-    updateOpenRouterSession(chatId, updates) {
-        const session = this.openRouterSessions.get(chatId);
-        if (session) {
-            Object.assign(session, updates);
-        }
-        return session;
-    }
-    
-    /**
-     * Delete OpenRouter session
-     */
-    deleteOpenRouterSession(chatId) {
-        const deleted = this.openRouterSessions.delete(chatId);
-        if (deleted) {
-            logger.info(`Deleted OpenRouter session for chat ${chatId}`);
-        }
-        return deleted;
     }
     
     /**
@@ -138,9 +88,8 @@ class SessionManager {
      */
     getActiveSessionsCount() {
         return {
-            openRouter: this.openRouterSessions.size,
             claudeAgents: this.claudeAgentSessions.size,
-            total: this.openRouterSessions.size + this.claudeAgentSessions.size
+            total: this.claudeAgentSessions.size
         };
     }
     
@@ -149,11 +98,10 @@ class SessionManager {
      * @param {string} chatId - Telegram chat ID
      */
     hasActiveSession(chatId) {
-        const hasOpenRouter = this.openRouterSessions.has(chatId);
         const hasClaudeAgent = Array.from(this.claudeAgentSessions.values())
             .some(session => session.chatId.toString() === chatId.toString());
         
-        return { hasOpenRouter, hasClaudeAgent, hasAny: hasOpenRouter || hasClaudeAgent };
+        return { hasClaudeAgent, hasAny: hasClaudeAgent };
     }
     
     /**
@@ -161,7 +109,6 @@ class SessionManager {
      * @param {string} chatId - Telegram chat ID
      */
     clearAllSessionsForChat(chatId) {
-        const openRouterDeleted = this.deleteOpenRouterSession(chatId);
         
         const claudeAgentIds = Array.from(this.claudeAgentSessions.entries())
             .filter(([, session]) => session.chatId.toString() === chatId.toString())
@@ -170,12 +117,10 @@ class SessionManager {
         claudeAgentIds.forEach(agentId => this.deleteClaudeAgentSession(agentId));
         
         logger.info(`Cleared all sessions for chat ${chatId}`, {
-            openRouterDeleted,
             claudeAgentsDeleted: claudeAgentIds.length
         });
         
         return {
-            openRouterDeleted,
             claudeAgentsDeleted: claudeAgentIds.length
         };
     }
@@ -196,22 +141,11 @@ class SessionManager {
      */
     getSessionStats() {
         const stats = {
-            openRouter: {
-                total: this.openRouterSessions.size,
-                waitingForResponse: 0,
-                waitingForAuth: 0
-            },
             claudeAgents: {
                 total: this.claudeAgentSessions.size,
                 waitingForUserResponse: 0
             }
         };
-        
-        // Count OpenRouter session states
-        for (const session of this.openRouterSessions.values()) {
-            if (session.waitingForResponse) stats.openRouter.waitingForResponse++;
-            if (session.waitingForAuth) stats.openRouter.waitingForAuth++;
-        }
         
         // Count Claude agent session states
         for (const session of this.claudeAgentSessions.values()) {
@@ -227,14 +161,6 @@ class SessionManager {
     cleanupStaleSessions() {
         const oneHourAgo = Date.now() - (60 * 60 * 1000);
         let cleaned = 0;
-        
-        // Clean OpenRouter sessions
-        for (const [chatId, session] of this.openRouterSessions) {
-            if (session.startTime < oneHourAgo) {
-                this.openRouterSessions.delete(chatId);
-                cleaned++;
-            }
-        }
         
         // Clean Claude agent sessions
         for (const [agentId, session] of this.claudeAgentSessions) {

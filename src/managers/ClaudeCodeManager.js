@@ -10,13 +10,12 @@ const logger = require('../utils/logger');
  * Handles authentication, agent lifecycle, and communication
  */
 class ClaudeCodeManager extends EventEmitter {
-    constructor(aiService = null) {
+    constructor() {
         super();
         this.claudeProcess = null;
         this.isAuthenticated = false;
         this.activeAgents = new Map();
         this.authData = null;
-        this.aiService = aiService; // For intelligent output filtering
         this.configPath = path.join(
             process.env.HOME || process.env.USERPROFILE, 
             '.claude-code-auth.json'
