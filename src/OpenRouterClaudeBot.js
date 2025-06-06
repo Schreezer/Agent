@@ -158,7 +158,7 @@ class OpenRouterClaudeBot {
             }
         });
         
-        this.claudeCodeManager.on('agent-output', async ({ chatId, text }) => {
+        this.claudeCodeManager.on('agent-output', async ({ agentId, chatId, text }) => {
             try {
                 // Send Claude Code output directly to user
                 await this.messageHandler.sendLongMessage(chatId, text);

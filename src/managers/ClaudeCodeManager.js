@@ -659,7 +659,6 @@ class ClaudeCodeManager extends EventEmitter {
             // Check if this is new content
             if (agent.outputBuffer !== agent.lastSentBuffer) {
                 logger.info(`Agent ${agent.id} READY TO SEND - Claude is done (no 'esc to interrupt')`);
-                agent.lastSentBuffer = agent.outputBuffer;
                 
                 return { 
                     hasNewOutput: true, 
@@ -782,9 +781,9 @@ class ClaudeCodeManager extends EventEmitter {
             });
             
             // Clear buffer and update last sent output
+            agent.lastSentBuffer = agent.outputBuffer; // Set to current buffer before clearing
             agent.outputBuffer = '';
             agent.lastSentOutput = currentLastLines;
-            agent.lastSentBuffer = ''; // Reset this too since buffer was cleared
             agent.isCheckingOutput = false;
             return;
             
