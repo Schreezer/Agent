@@ -14,6 +14,10 @@ class Config {
         this.messageChunkDelay = parseInt(process.env.MESSAGE_CHUNK_DELAY) || 500;
         this.maxMessageLength = parseInt(process.env.MAX_MESSAGE_LENGTH) || 4096;
         
+        // OpenRouter configuration for output cleaning
+        this.openRouterApiKey = process.env.OPENROUTER_API_KEY;
+        this.detectionModel = process.env.DETECTION_MODEL || 'google/gemini-2.5-flash-preview-05-20';
+        
         // Logging
         this.logLevel = process.env.LOG_LEVEL || 'info';
         this.logFile = process.env.LOG_FILE || 'logs/claude-code-bot.log';
@@ -45,6 +49,10 @@ class Config {
                 messageChunkDelay: this.messageChunkDelay,
                 maxMessageLength: this.maxMessageLength
             },
+            openRouter: {
+                apiKey: this.openRouterApiKey ? '***' : null,
+                detectionModel: this.detectionModel
+            },
             logging: {
                 logLevel: this.logLevel,
                 logFile: this.logFile
@@ -58,7 +66,8 @@ class Config {
     getSummary() {
         return {
             authorizedUsers: this.authorizedUsers.length,
-            allowAll: this.authorizedUsers.length === 0
+            allowAll: this.authorizedUsers.length === 0,
+            outputCleaningEnabled: !!this.openRouterApiKey
         };
     }
 }

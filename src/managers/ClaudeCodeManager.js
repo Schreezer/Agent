@@ -441,8 +441,8 @@ class ClaudeCodeManager extends EventEmitter {
             
             logger.info(`Agent ${agent.id}: ${detection.reason}`);
             
-            // TEMP: Skip AI filtering - just use simple detection
-            logger.info(`TEMP: Skipping AI filter - sending based on simple detection`);
+            // Send output for processing (will be cleaned by OutputCleanerService)
+            logger.info(`Sending output for LLM cleaning: ${agent.outputBuffer.length} chars`);
             
             agent.conversationHistory.push({
                 type: 'claude',
