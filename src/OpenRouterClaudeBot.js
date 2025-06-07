@@ -159,10 +159,16 @@ class OpenRouterClaudeBot {
                 const duration = Math.round((Date.now() - session.startTime) / 1000);
                 await this.bot.sendMessage(session.chatId,
                     `✅ Claude Code task completed (exit code: ${code}, ${duration}s)\\n\\n` +
-                    `💬 Send another message to continue with Claude Code!`,
+                    `💬 Send another message to continue with Claude Code!\\n` +
+                    `🔗 Context preserved - your conversation history is maintained.`,
                     { parse_mode: 'Markdown' }
                 );
-                // Keep session alive for follow-up interactions - user can use /new or /cancel to end
+                // Update session status but keep it alive for follow-up interactions
+                this.sessionManager.updateClaudeAgentSession(taskId, { 
+                    status: 'completed',
+                    completedAt: Date.now(),
+                    exitCode: code
+                });
             }
         });
         
