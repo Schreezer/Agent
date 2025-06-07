@@ -79,6 +79,44 @@ pm2 logs openrouter-claude-bot --no-stream --lines 20
 
 Without `--no-stream`, the command will hang indefinitely.
 
+### Google Cloud Deployment
+
+**Instance Information:**
+- **Name**: `instance-20250601-135641`
+- **Zone**: `us-central1-c`
+- **Machine Type**: `custom (e2, 4 vCPU, 12.00 GiB)`
+- **Internal IP**: `10.128.0.3`
+- **External IP**: `34.56.75.194`
+- **Status**: `RUNNING`
+
+**Deployment Commands:**
+```bash
+# Connect to the instance
+gcloud compute ssh instance-20250601-135641 --zone=us-central1-c
+
+# Deploy updated code (from local machine)
+gcloud compute ssh instance-20250601-135641 --zone=us-central1-c --command="cd openrouter-claude-bot && git pull && npm install && pm2 restart openrouter-claude-bot"
+
+# Check PM2 status on VM
+gcloud compute ssh instance-20250601-135641 --zone=us-central1-c --command="pm2 status"
+
+# View logs (WARNING: pm2 logs will hang without timeout)
+gcloud compute ssh instance-20250601-135641 --zone=us-central1-c --command="pm2 logs openrouter-claude-bot --lines 20"
+
+# List running instances
+gcloud compute instances list
+```
+
+**VM Directory Structure:**
+```
+/home/chirag_2/
+├── openrouter-claude-bot/          # Main bot directory
+├── .pm2/logs/                      # PM2 logs directory
+│   ├── openrouter-claude-bot-out.log
+│   └── openrouter-claude-bot-error.log
+└── .claude-code-auth.json          # Claude authentication data
+```
+
 ### File Structure
 - `/src/handlers/` - Message and callback processing
 - `/src/managers/` - Session and Claude Code management  
@@ -133,6 +171,13 @@ Uses `node-pty` for full terminal emulation, supporting:
 - Extracted OutputDetector (processing state detection)
 - Main ClaudeCodeManager now orchestrates utility components
 - Improved maintainability and testability
+
+**LLM Output Cleaning (v2.1):**
+- Fixed OutputCleanerService configuration to properly load OpenRouter API key
+- Enabled full LLM cleaning pipeline: Claude Code → OutputCleanerService → Telegram
+- Removed temporary AI filtering bypass in ClaudeCodeManager
+- Gemini 2.5 Flash now intelligently filters Claude output for mobile chat
+- Conversation history context provided to LLM for better cleaning decisions
 
 **Termination Pattern Analysis:**
 - Identified and documented all automatic termination triggers
