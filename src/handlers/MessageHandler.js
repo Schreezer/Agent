@@ -448,34 +448,76 @@ class MessageHandler {
                     return;
                 }
             } else {
-                // Fallback to basic cleaning if LLM service not available
-                finalText = this.cleanClaudeCodeOutput(text);
+                // Fallback to minimal cleaning if LLM service not available
+                finalText = this.cleanClaudeCodeOutputMinimal(text);
                 if (!finalText || finalText.trim().length === 0) {
                     return;
                 }
             }
             
-            // Send the cleaned text
-            await this.sendLongMessage(chatId, finalText);
+            // Send the processed text directly without additional cleaning
+            await this.sendLongMessageDirect(chatId, finalText);
             
         } catch (error) {
-            logger.error('Error in LLM cleaning, falling back to basic cleaning:', error);
-            // Fallback to basic cleaning
-            const fallbackText = this.cleanClaudeCodeOutput(text);
+            logger.error('Error in LLM cleaning, falling back to minimal cleaning:', error);
+            // Fallback to minimal cleaning and direct sending
+            const fallbackText = this.cleanClaudeCodeOutputMinimal(text);
             if (fallbackText && fallbackText.trim().length > 0) {
-                await this.sendLongMessage(chatId, fallbackText);
+                await this.sendLongMessageDirect(chatId, fallbackText);
             }
         }
     }
 
     /**
-     * Send long message (split if needed)
+     * Send long message directly without any cleaning (for LLM-processed content)
+     */
+    async sendLongMessageDirect(chatId, text) {
+        const maxLength = 4096;
+        
+        // Don't send if text is empty
+        if (!text || text.trim().length === 0) {
+            return;
+        }
+        
+        if (text.length <= maxLength) {
+            await this.sendMessageWithMarkdown(chatId, text);
+            return;
+        }
+        
+        // Split into chunks without any content modification
+        const chunks = [];
+        let currentChunk = '';
+        
+        const lines = text.split('\n');
+        for (const line of lines) {
+            if (currentChunk.length + line.length + 1 > maxLength) {
+                chunks.push(currentChunk);
+                currentChunk = line;
+            } else {
+                currentChunk += (currentChunk ? '\n' : '') + line;
+            }
+        }
+        
+        if (currentChunk) chunks.push(currentChunk);
+        
+        for (let i = 0; i < chunks.length; i++) {
+            if (chunks[i].trim().length > 0) {
+                await this.sendMessageWithMarkdown(chatId, chunks[i]);
+                if (i < chunks.length - 1) {
+                    await new Promise(resolve => setTimeout(resolve, 500));
+                }
+            }
+        }
+    }
+
+    /**
+     * Send long message with fallback cleaning (for non-LLM processed content)
      */
     async sendLongMessage(chatId, text) {
         const maxLength = 4096;
         
-        // Clean Claude Code output for Telegram
-        const cleanText = this.cleanClaudeCodeOutput(text);
+        // Apply minimal cleaning for fallback cases
+        const cleanText = this.cleanClaudeCodeOutputMinimal(text);
         
         // Don't send if cleaned text is empty (filtered out as noise)
         if (!cleanText || cleanText.trim().length === 0) {
@@ -513,96 +555,30 @@ class MessageHandler {
     }
     
     /**
-     * Clean Claude Code output for Telegram
+     * Minimal cleaning for fallback cases (when LLM cleaning fails)
      */
-    cleanClaudeCodeOutput(text) {
+    cleanClaudeCodeOutputMinimal(text) {
         if (!text) return '';
         
-        // Remove ANSI escape codes (comprehensive)
+        // Only remove ANSI escape codes and control characters
         let cleaned = text.replace(/\x1b\[[0-9;]*[mGKH]/g, '');
         cleaned = cleaned.replace(/\x1b\[[\d;]*[A-Za-z]/g, '');
-        
-        // Remove other control characters except newlines and tabs
         cleaned = cleaned.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, '');
-        
-        // Remove box drawing characters and special symbols
-        cleaned = cleaned.replace(/[╭╮╯╰│─┌┐└┘├┤┬┴┼▶◀▲▼]/g, '');
-        
-        // Remove cursor positioning and other escape sequences
-        cleaned = cleaned.replace(/\x1b\[[\d;]*[A-Za-z]/g, '');
-        cleaned = cleaned.replace(/\[(\d+[A-Z]|\?[0-9]+[a-z])/g, '');
-        
-        // Selectively escape only truly problematic Telegram markdown characters
-        // Keep dashes, hashes, and other formatting characters for readability
-        cleaned = cleaned.replace(/[_*`[\]()~]/g, function(match) {
-            return '\\' + match;
-        });
         
         // Remove excessive whitespace
         cleaned = cleaned.replace(/[ \t]+/g, ' ');
         cleaned = cleaned.replace(/\n\s*\n\s*\n+/g, '\n\n');
         
-        // Filter out noise lines
-        const lines = cleaned.split('\n');
-        const meaningfulLines = lines.filter(line => {
-            const trimmed = line.trim();
-            return trimmed.length > 0 && 
-                   !trimmed.match(/^[\s\-_=*#.]+$/) && // Skip decoration lines
-                   !trimmed.match(/^\?/) && // Skip help prompts
-                   !trimmed.match(/^[\s>]*$/) && // Skip empty prompts
-                   !trimmed.includes('shortcuts') &&
-                   !trimmed.includes('Bypassing Permissions') &&
-                   !trimmed.includes('Loading') &&
-                   !trimmed.match(/^Welcome to Claude/) &&
-                   !trimmed.match(/^✻ Welcome to Claude Code/) && // Skip welcome screen
-                   !trimmed.includes('/help for help') && // Skip help instructions
-                   !trimmed.includes('/status for your current setup') && // Skip setup instructions
-                   !trimmed.match(/^cwd: \//) && // Skip current working directory
-                   !trimmed.match(/^>\s*Try "/) && // Skip suggestion prompts like "> Try 'refactor...'"
-                   !trimmed.match(/^>\s+/) && // Skip user input echo lines that start with "> "
-                   !trimmed.match(/^✢.*Accomplishing.*/) && // Skip progress indicators
-                   !trimmed.match(/^\\\(.*·.*tokens.*\\\)/) && // Skip token counters
-                   !trimmed.match(/^\\>$/) && // Skip lone prompt symbols
-                   !trimmed.match(/^esc to interrupt/) && // Skip interrupt hints
-                   !trimmed.includes('↑ 0 tokens') &&
-                   !trimmed.includes('Accomplishing') &&
-                   !trimmed.includes('tokens ·') &&
-                   !trimmed.match(/^\d+s ·/) && // Skip time indicators like "3s ·"
-                   !trimmed.match(/^[\\>]+\s*$/) && // Skip escaped prompts
-                   !trimmed.includes('limit reached') && // Skip model limit messages
-                   !trimmed.includes('now using') && // Skip model switching messages
-                   !trimmed.match(/Sonnet \d+ ◯/) && // Skip model status indicators
-                   !trimmed.match(/Opus \d+ limit/) && // Skip specific limit messages
-                   !trimmed.match(/Claude.*limit.*reached/); // Skip Claude limit messages
-        });
-        
-        // Remove duplicates and very similar lines
-        const uniqueLines = [];
-        const seenLines = new Set();
-        
-        for (const line of meaningfulLines) {
-            const normalized = line.toLowerCase().replace(/[^\w\s]/g, '').replace(/\s+/g, ' ').trim();
-            if (!seenLines.has(normalized) && normalized.length > 3) {
-                seenLines.add(normalized);
-                uniqueLines.push(line);
-            }
-        }
-        
-        cleaned = uniqueLines.join('\n').trim();
-        
-        // Final safety checks - don't send if it's just noise
-        if (cleaned.length === 0 || 
-            cleaned.includes('processing your request') ||
-            cleaned.match(/^(Claude|Sonnet|Opus).*limit.*reached/i) ||
-            cleaned.match(/^now using/i)) {
-            return ''; // Return empty to suppress sending
-        }
-        
-        if (cleaned.length > 3000) {
-            cleaned = cleaned.substring(0, 2900) + '\n\n... (output truncated)';
-        }
-        
-        return cleaned;
+        return cleaned.trim();
+    }
+
+    /**
+     * DEPRECATED: Legacy cleaning function (kept for reference)
+     * The LLM should handle all formatting now
+     */
+    cleanClaudeCodeOutput(text) {
+        // Redirect to minimal cleaning - LLM should handle everything else
+        return this.cleanClaudeCodeOutputMinimal(text);
     }
     
     /**
