@@ -6,13 +6,13 @@ const http = require('http');
  * Handles all incoming Telegram messages
  */
 class MessageHandler {
-    constructor(bot, sessionManager, claudeCodeManager, aiService, config) {
+    constructor(bot, sessionManager, claudeCodeManager, config, outputCleanerService = null) {
         this.bot = bot;
         this.sessionManager = sessionManager;
         this.claudeCodeManager = claudeCodeManager;
-        this.aiService = aiService;
         this.config = config;
         this.authorizedUsers = config.authorizedUsers;
+        this.outputCleanerService = outputCleanerService;
     }
     
     /**
@@ -34,18 +34,7 @@ class MessageHandler {
                 return;
             }
             
-            // Handle authentication code
-            const session = this.sessionManager.getOpenRouterSession(chatId);
-            if (session && session.waitingForAuth) {
-                await this.handleAuthCode(chatId, text);
-                return;
-            }
-            
-            // Handle OpenRouter response
-            if (session && session.waitingForResponse) {
-                await this.handleUserResponse(chatId, text, session);
-                return;
-            }
+            // Note: Authentication and OpenRouter response handling removed (direct Claude Code mode)
             
             // Handle Claude agent response
             const claudeSession = this.sessionManager.getClaudeAgentSessionByChat(chatId);
@@ -54,20 +43,11 @@ class MessageHandler {
                     waitingForUserResponse: false
                 });
                 
-                // Process user response through main model to determine terminal command
-                const lastQuestion = claudeSession.lastQuestion || 'User input needed';
-                const terminalCommand = await this.aiService.processUserResponseToTerminalCommand(
-                    text, 
-                    lastQuestion, 
-                    claudeSession.task
-                );
+                // Add user response to conversation history
+                this.sessionManager.addToConversationHistory(chatId, 'user', text);
                 
-                await this.bot.sendMessage(chatId,
-                    `🤖 Interpreting your response as: \`${terminalCommand}\``,
-                    { parse_mode: 'Markdown' }
-                );
-                
-                await this.claudeCodeManager.sendCommand(claudeSession.agentId, terminalCommand);
+                // Send user's response directly to Claude Code (no AI interpretation needed)
+                await this.claudeCodeManager.sendCommand(claudeSession.agentId, text);
                 return;
             }
             
@@ -88,14 +68,19 @@ class MessageHandler {
                     { parse_mode: 'Markdown' }
                 );
                 
+                // Add follow-up message to conversation history
+                this.sessionManager.addToConversationHistory(chatId, 'user', text);
+                
                 // Send the user's message directly to Claude Code
                 await this.claudeCodeManager.sendCommand(latestAgent.agentId, text);
                 return;
             }
             
-            // Start new task if no active Claude sessions
+            // Route all text messages directly to Claude Code (bypassing OpenRouter)
             if (text && text.trim().length > 0) {
-                await this.startNewTask(chatId, text);
+                // Add user message to conversation history
+                this.sessionManager.addToConversationHistory(chatId, 'user', text);
+                await this.startClaudeAgent(chatId, text);
             }
         } catch (error) {
             logger.error('Error handling message:', error);
@@ -115,6 +100,10 @@ class MessageHandler {
                 await this.handleStartCommand(chatId);
                 break;
                 
+            case '/help':
+                await this.handleHelpCommand(chatId);
+                break;
+                
             case '/cancel':
                 await this.handleCancelCommand(chatId);
                 break;
@@ -131,6 +120,18 @@ class MessageHandler {
                 await this.handleNewCommand(chatId);
                 break;
                 
+            case '/restart':
+                await this.handleRestartCommand(chatId);
+                break;
+                
+            case '/interrupt':
+                await this.handleInterruptCommand(chatId);
+                break;
+                
+            case '/sessions':
+                await this.handleSessionsCommand(chatId);
+                break;
+                
             case '/files':
                 await this.handleFilesCommand(chatId);
                 break;
@@ -144,7 +145,7 @@ class MessageHandler {
                 break;
                 
             default:
-                await this.bot.sendMessage(chatId, '❓ Unknown command');
+                await this.bot.sendMessage(chatId, '❓ Unknown command. Use /help to see all available commands.');
         }
     }
     
@@ -153,23 +154,25 @@ class MessageHandler {
      */
     async handleStartCommand(chatId) {
         await this.bot.sendMessage(chatId,
-            '🤖 *OpenRouter + Claude Code Bot*\\n\\n' +
-            'Intelligent task execution with seamless Claude Code integration!\\n\\n' +
-            `🧠 Main Model: \`${this.config.mainModel}\`\\n` +
-            `🔍 Detection Model: \`${this.config.detectionModel}\`\\n\\n` +
+            '🤖 *Claude Code Telegram Bot*\\n\\n' +
+            'Direct access to Claude Code with all its powerful capabilities!\\n\\n' +
             '**How it works:**\\n' +
-            '• Send any task in natural language\\n' +
-            '• AI automatically uses Claude Code for complex tasks\\n' +
-            '• Your exact message is passed to Claude Code\\n' +
+            '• Send any task or question in natural language\\n' +
+            '• Everything goes directly to Claude Code\\n' +
+            '• Claude Code has access to files, web, system commands, and more\\n' +
             '• No permission prompts - seamless execution\\n\\n' +
             '**Commands:**\\n' +
-            '• `/claude <task>` - Direct Claude Code access\\n' +
+            '• `/claude <task>` - Direct Claude Code access (same as regular messages)\\n' +
             '• `/status` - Check bot status\\n' +
             '• `/files` - List uploaded files\\n' +
             '• `/delete <filename>` - Delete specific file\\n' +
             '• `/cleanup` - Delete all files\\n' +
             '• `/new` - Start fresh conversation\\n' +
-            '• `/cancel` - Cancel current task',
+            '• `/cancel` - Cancel current task\\n\\n' +
+            '**Examples:**\\n' +
+            '• "Hi, how are you?" - Claude Code handles conversations\\n' +
+            '• "Fix the bugs in my code" - Technical tasks\\n' +
+            '• "What\'s the weather like?" - Web searches and real-time data',
             { parse_mode: 'Markdown' }
         );
     }
@@ -180,13 +183,12 @@ class MessageHandler {
     async handleCancelCommand(chatId) {
         const cleared = this.sessionManager.clearAllSessionsForChat(chatId);
         
-        if (cleared.openRouterDeleted || cleared.claudeAgentsDeleted > 0) {
+        if (cleared.claudeAgentsDeleted > 0) {
             await this.bot.sendMessage(chatId, 
-                `❌ Cancelled ${cleared.openRouterDeleted ? 'OpenRouter task' : ''} ` +
-                `${cleared.claudeAgentsDeleted > 0 ? `${cleared.claudeAgentsDeleted} Claude agent(s)` : ''}`
+                `❌ Cancelled ${cleared.claudeAgentsDeleted} Claude Code session(s)`
             );
         } else {
-            await this.bot.sendMessage(chatId, 'No active tasks to cancel');
+            await this.bot.sendMessage(chatId, 'No active Claude Code sessions to cancel');
         }
     }
     
@@ -200,15 +202,14 @@ class MessageHandler {
         await this.bot.sendMessage(chatId,
             `📊 *Bot Status*\\n\\n` +
             `**Your Sessions:**\\n` +
-            `• OpenRouter: ${sessionStatus.hasOpenRouter ? '🟢 Active' : '⚪ None'}\\n` +
-            `• Claude Agents: ${sessionStatus.hasClaudeAgent ? '🟢 Active' : '⚪ None'}\\n\\n` +
+            `• Claude Code: ${sessionStatus.hasClaudeAgent ? '🟢 Active' : '⚪ None'}\\n\\n` +
             `**Global Stats:**\\n` +
-            `• OpenRouter Tasks: ${globalStats.openRouter.total}\\n` +
-            `• Claude Agents: ${globalStats.claudeAgents.total}\\n` +
+            `• Total Claude Sessions: ${globalStats.claudeAgents.total}\\n` +
             `• Claude Auth: ${this.claudeCodeManager.isAuthenticated ? '✅' : '❌'}\\n\\n` +
-            `**Models:**\\n` +
-            `• Main: \`${this.config.mainModel}\`\\n` +
-            `• Detection: \`${this.config.detectionModel}\``,
+            `**Architecture:**\\n` +
+            `• Direct Claude Code routing (OpenRouter bypassed)\\n` +
+            `• All messages → Claude Code\\n` +
+            `• Simplified, faster responses`,
             { parse_mode: 'Markdown' }
         );
     }
@@ -222,9 +223,12 @@ class MessageHandler {
         
         if (!args) {
             await this.bot.sendMessage(chatId,
-                '💡 *Claude Code Direct Mode*\\n\\n' +
+                '💡 *Claude Code Command*\\n\\n' +
                 'Usage: `/claude <task>`\\n\\n' +
-                'Example: `/claude fix the type errors in auth module`',
+                '**Note:** This command does the same as sending a regular message.\\n' +
+                'All messages now go directly to Claude Code!\\n\\n' +
+                'Example: `/claude fix the type errors in auth module`\\n' +
+                'Same as: `fix the type errors in auth module`',
                 { parse_mode: 'Markdown' }
             );
         } else {
@@ -236,6 +240,9 @@ class MessageHandler {
      * Handle /new command - start fresh conversation
      */
     async handleNewCommand(chatId) {
+        // Clear conversation history for LLM cleaning context
+        this.sessionManager.clearConversationHistory(chatId);
+        
         // Clear all active sessions for this chat
         const cleared = this.sessionManager.clearAllSessionsForChat(chatId);
         
@@ -247,178 +254,136 @@ class MessageHandler {
         
         let statusMessage = '🔄 *New conversation started!*\\n\\n';
         
-        if (cleared.openRouterDeleted || cleared.claudeAgentsDeleted > 0) {
+        if (cleared.claudeAgentsDeleted > 0) {
             statusMessage += '**Cleared:**\\n';
-            if (cleared.openRouterDeleted) {
-                statusMessage += `• OpenRouter session\\n`;
-            }
-            if (cleared.claudeAgentsDeleted > 0) {
-                statusMessage += `• ${cleared.claudeAgentsDeleted} Claude Code session(s)\\n`;
-            }
-            statusMessage += '\\n';
+            statusMessage += `• ${cleared.claudeAgentsDeleted} Claude Code session(s)\\n\\n`;
         }
         
         statusMessage += '**Ready for new tasks!**\\n' +
-                        'Send any request and I\'ll analyze and execute it intelligently.';
+                        'Send any message and Claude Code will handle it directly.';
         
         await this.bot.sendMessage(chatId, statusMessage, { parse_mode: 'Markdown' });
     }
     
     /**
-     * Handle authentication code
+     * Handle /help command
      */
-    async handleAuthCode(chatId, code) {
-        const session = this.sessionManager.getOpenRouterSession(chatId);
-        if (!session || !session.waitingForAuth) return;
+    async handleHelpCommand(chatId) {
+        await this.bot.sendMessage(chatId,
+            '📚 *Claude Code Telegram Bot - Help*\\n\\n' +
+            '**Basic Commands:**\\n' +
+            '• `/start` - Welcome message and bot overview\\n' +
+            '• `/help` - Show this help message\\n' +
+            '• `/status` - Check bot and session status\\n\\n' +
+            '**Claude Code Commands:**\\n' +
+            '• `/claude <task>` - Direct Claude Code access (same as regular messages)\\n' +
+            '• `/new` - Start fresh conversation (clears all sessions)\\n' +
+            '• `/cancel` - Cancel active Claude Code sessions\\n' +
+            '• `/restart` - Restart current Claude Code agent\\n' +
+            '• `/interrupt` - Send ESC key to Claude Code (interrupt processing)\\n' +
+            '• `/sessions` - List all active Claude Code sessions\\n\\n' +
+            '**File Management:**\\n' +
+            '• `/files` - List uploaded files with sizes and paths\\n' +
+            '• `/delete <filename>` - Delete specific uploaded file\\n' +
+            '• `/cleanup` - Delete all uploaded files (with confirmation)\\n\\n' +
+            '**Usage:**\\n' +
+            '• Send any message directly to Claude Code\\n' +
+            '• Upload files by sending documents, photos, etc.\\n' +
+            '• Use `/restart` if Claude Code gets stuck\\n' +
+            '• Use `/interrupt` to stop long-running operations',
+            { parse_mode: 'Markdown' }
+        );
+    }
+    
+    /**
+     * Handle /restart command
+     */
+    async handleRestartCommand(chatId) {
+        const claudeAgents = this.sessionManager.getAllClaudeAgentSessionsForChat(chatId);
         
-        this.sessionManager.updateOpenRouterSession(chatId, { waitingForAuth: false });
+        if (claudeAgents.length === 0) {
+            await this.bot.sendMessage(chatId, '❌ No active Claude Code sessions to restart');
+            return;
+        }
         
-        try {
-            await this.claudeCodeManager.saveAuthData({
-                authCode: code,
-                timestamp: Date.now()
-            });
-            
+        // Kill all active Claude agents for this chat
+        for (const agent of claudeAgents) {
+            await this.claudeCodeManager.killAgent(agent.agentId);
+        }
+        
+        // Clear sessions
+        this.sessionManager.clearAllSessionsForChat(chatId);
+        
+        await this.bot.sendMessage(chatId,
+            `🔄 *Claude Code Agent Restarted*\\n\\n` +
+            `Killed ${claudeAgents.length} active session(s)\\n\\n` +
+            `💬 Send a new message to start a fresh Claude Code session!`,
+            { parse_mode: 'Markdown' }
+        );
+    }
+    
+    /**
+     * Handle /interrupt command
+     */
+    async handleInterruptCommand(chatId) {
+        const claudeAgents = this.sessionManager.getAllClaudeAgentSessionsForChat(chatId);
+        
+        if (claudeAgents.length === 0) {
+            await this.bot.sendMessage(chatId, '❌ No active Claude Code sessions to interrupt');
+            return;
+        }
+        
+        // Send ESC key to all active agents
+        let interrupted = 0;
+        for (const agent of claudeAgents) {
+            try {
+                await this.claudeCodeManager.sendCommand(agent.agentId, 'ESCAPE');
+                interrupted++;
+            } catch (error) {
+                logger.error(`Failed to interrupt agent ${agent.agentId}:`, error);
+            }
+        }
+        
+        await this.bot.sendMessage(chatId,
+            `⏹️ *Interrupt Signal Sent*\\n\\n` +
+            `Sent ESC key to ${interrupted}/${claudeAgents.length} Claude Code session(s)\\n\\n` +
+            `This should stop any running operations.`,
+            { parse_mode: 'Markdown' }
+        );
+    }
+    
+    /**
+     * Handle /sessions command
+     */
+    async handleSessionsCommand(chatId) {
+        const claudeAgents = this.sessionManager.getAllClaudeAgentSessionsForChat(chatId);
+        
+        if (claudeAgents.length === 0) {
             await this.bot.sendMessage(chatId,
-                '✅ Authentication successful! Claude Code is now ready to use.\\n\\n' +
-                'You can:\\n' +
-                '• Continue with your task\\n' +
-                '• Use `/claude <task>` for direct Claude Code access',
+                '📋 *No Active Sessions*\\n\\n' +
+                'Send any message to start a new Claude Code session!',
                 { parse_mode: 'Markdown' }
             );
-            
-            // Continue with pending task
-            if (session.pendingClaudeTask) {
-                await this.startClaudeAgent(chatId, session.pendingClaudeTask);
-                this.sessionManager.updateOpenRouterSession(chatId, { pendingClaudeTask: null });
-            }
-        } catch (error) {
-            logger.error('Auth code handling error:', error);
-            await this.bot.sendMessage(chatId, '❌ Authentication failed. Please try again.');
+            return;
         }
-    }
-    
-    /**
-     * Start new OpenRouter task
-     */
-    async startNewTask(chatId, task) {
-        const session = this.sessionManager.createOpenRouterSession(chatId, task);
         
-        const processingMsg = await this.bot.sendMessage(chatId,
-            '🔄 Processing your request with OpenRouter...'
-        );
+        let message = `📋 *Active Claude Code Sessions (${claudeAgents.length})*\\n\\n`;
         
-        try {
-            await this.executeTask(chatId, task, session, processingMsg.message_id);
-        } catch (error) {
-            logger.error('Task execution error:', error);
-            this.sessionManager.deleteOpenRouterSession(chatId);
-            await this.sendError(chatId, 'Failed to execute task');
-        }
-    }
-    
-    /**
-     * Execute OpenRouter task
-     */
-    async executeTask(chatId, userInput, session, processingMsgId = null) {
-        try {
-            const response = await this.aiService.processTask(userInput, session);
+        claudeAgents.forEach((agent, index) => {
+            const duration = Math.round((Date.now() - agent.startTime) / 1000);
+            const minutes = Math.floor(duration / 60);
+            const seconds = duration % 60;
+            const durationStr = minutes > 0 ? `${minutes}m ${seconds}s` : `${seconds}s`;
             
-            if (processingMsgId) {
-                try {
-                    await this.bot.deleteMessage(chatId, processingMsgId);
-                } catch (e) {
-                    // Ignore deletion errors
-                }
-            }
-            
-            // Check if AI suggests using Claude Code - auto-execute without permission
-            if (this.aiService.detectClaudeCodeSuggestion(response)) {
-                // Clean up the session and start Claude Code directly
-                this.sessionManager.deleteOpenRouterSession(chatId);
-                
-                await this.bot.sendMessage(chatId,
-                    `🔧 *Using Claude Code for this task*\\n\\n` +
-                    `Claude Code can provide real-time data, file access, and system commands for better results.`,
-                    { parse_mode: 'Markdown' }
-                );
-                
-                // Start Claude Code directly with the original task
-                await this.startClaudeAgent(chatId, session.task);
-                return;
-            }
-            
-            // Check if AI is asking for input
-            const needsInput = await this.aiService.detectQuestion(response, session);
-            
-            if (needsInput) {
-                this.sessionManager.updateOpenRouterSession(chatId, { waitingForResponse: true });
-                
-                await this.bot.sendMessage(chatId,
-                    `${response}\\n\\n` +
-                    `💬 *Please provide your response:*`,
-                    {
-                        parse_mode: 'Markdown',
-                        reply_markup: {
-                            force_reply: true,
-                            input_field_placeholder: "Type your response..."
-                        }
-                    }
-                );
-            } else {
-                // Check if task is complete
-                const isComplete = await this.aiService.detectCompletion(response);
-                
-                if (isComplete) {
-                    await this.sendLongMessage(chatId, response);
-                    await this.bot.sendMessage(chatId,
-                        '✅ Task completed!\\n\\n' +
-                        `📊 Stats:\\n` +
-                        `• Interactions: ${session.interactions}\\n` +
-                        `• Detection Checks: ${session.detectionChecks}\\n` +
-                        `• Duration: ${Math.round((Date.now() - session.startTime) / 1000)}s`,
-                        {
-                            parse_mode: 'Markdown',
-                            reply_markup: { remove_keyboard: true }
-                        }
-                    );
-                    this.sessionManager.deleteOpenRouterSession(chatId);
-                } else {
-                    // Progress update
-                    await this.sendLongMessage(chatId, response);
-                    
-                    await this.bot.sendMessage(chatId,
-                        'What would you like to do next?',
-                        {
-                            reply_markup: {
-                                inline_keyboard: [[
-                                    { text: '▶️ Continue', callback_data: 'continue' },
-                                    { text: '✅ Complete', callback_data: 'complete' },
-                                    { text: '❌ Cancel', callback_data: 'cancel' }
-                                ]]
-                            }
-                        }
-                    );
-                }
-            }
-        } catch (error) {
-            logger.error('Task execution error:', error);
-            throw error;
-        }
-    }
-    
-    /**
-     * Handle user response
-     */
-    async handleUserResponse(chatId, response, session) {
-        this.sessionManager.updateOpenRouterSession(chatId, { waitingForResponse: false });
+            message += `**${index + 1}\\. Session ${agent.agentId.split('_').pop()}**\\n`;
+            message += `   ⏱️ Duration: ${durationStr}\\n`;
+            message += `   📝 Task: ${agent.task.substring(0, 50)}${agent.task.length > 50 ? '...' : ''}\\n`;
+            message += `   🔄 Status: ${agent.waitingForUserResponse ? 'Waiting for input' : 'Active'}\\n\\n`;
+        });
         
-        const processingMsg = await this.bot.sendMessage(chatId,
-            '🤔 Processing your response...',
-            { reply_markup: { remove_keyboard: true } }
-        );
+        message += '_Use `/restart` to restart all sessions or `/cancel` to cancel them._';
         
-        await this.executeTask(chatId, response, session, processingMsg.message_id);
+        await this.bot.sendMessage(chatId, message, { parse_mode: 'Markdown' });
     }
     
     /**
@@ -432,6 +397,9 @@ class MessageHandler {
             const taskId = `claude_${chatId}_${Date.now()}`;
             this.sessionManager.createClaudeAgentSession(taskId, chatId, task);
             
+            // Initialize conversation history with the user's task
+            this.sessionManager.addToConversationHistory(chatId, 'user', task);
+            
             // Get uploaded files for context
             const uploadedFiles = await this.sessionManager.getUploadedFiles(chatId);
             let enhancedTask = task;
@@ -444,14 +412,13 @@ class MessageHandler {
                 enhancedTask += '\nYou can access these files directly using their paths.';
             }
             
-            await this.bot.sendMessage(chatId,
-                `🔧 *Using Claude Code for this task*\\n\\n` +
-                `📋 Task: ${task}\\n` +
-                `🤖 Agent ID: \`${taskId}\`\\n` +
-                (uploadedFiles.length > 0 ? `📁 Files available: ${uploadedFiles.length}\\n` : '') +
-                `\\n_Claude Code has access to real-time data, file system, web APIs, and system commands..._`,
-                { parse_mode: 'Markdown' }
-            );
+            // Optional: Show brief status only if files are available
+            if (uploadedFiles.length > 0) {
+                await this.bot.sendMessage(chatId,
+                    `📁 ${uploadedFiles.length} uploaded file(s) available for Claude Code`,
+                    { parse_mode: 'Markdown' }
+                );
+            }
             
             // Pass enhanced task with file context to Claude Code
             await this.claudeCodeManager.createAgent(chatId, taskId, enhancedTask);
@@ -465,13 +432,92 @@ class MessageHandler {
     }
     
     /**
-     * Send long message (split if needed)
+     * Send long message with LLM cleaning (split if needed)
+     */
+    async sendLongMessageWithCleaning(chatId, text, conversationHistory = []) {
+        try {
+            let finalText = text;
+            
+            // Use LLM cleaning if service is available and enabled
+            if (this.outputCleanerService && this.outputCleanerService.isEnabled()) {
+                finalText = await this.outputCleanerService.cleanOutput(text, conversationHistory, chatId);
+                
+                // If LLM returns empty string, skip sending (it was deemed noise)
+                if (!finalText || finalText.trim().length === 0) {
+                    logger.info(`LLM filtered out output for chat ${chatId} - deemed noise/unnecessary`);
+                    return;
+                }
+            } else {
+                // Fallback to minimal cleaning if LLM service not available
+                finalText = this.cleanClaudeCodeOutputMinimal(text);
+                if (!finalText || finalText.trim().length === 0) {
+                    return;
+                }
+            }
+            
+            // Send the processed text directly without additional cleaning
+            await this.sendLongMessageDirect(chatId, finalText);
+            
+        } catch (error) {
+            logger.error('Error in LLM cleaning, falling back to minimal cleaning:', error);
+            // Fallback to minimal cleaning and direct sending
+            const fallbackText = this.cleanClaudeCodeOutputMinimal(text);
+            if (fallbackText && fallbackText.trim().length > 0) {
+                await this.sendLongMessageDirect(chatId, fallbackText);
+            }
+        }
+    }
+
+    /**
+     * Send long message directly without any cleaning (for LLM-processed content)
+     */
+    async sendLongMessageDirect(chatId, text) {
+        const maxLength = 4096;
+        
+        // Don't send if text is empty
+        if (!text || text.trim().length === 0) {
+            return;
+        }
+        
+        if (text.length <= maxLength) {
+            await this.sendMessageWithMarkdown(chatId, text);
+            return;
+        }
+        
+        // Split into chunks without any content modification
+        const chunks = [];
+        let currentChunk = '';
+        
+        const lines = text.split('\n');
+        for (const line of lines) {
+            if (currentChunk.length + line.length + 1 > maxLength) {
+                chunks.push(currentChunk);
+                currentChunk = line;
+            } else {
+                currentChunk += (currentChunk ? '\n' : '') + line;
+            }
+        }
+        
+        if (currentChunk) chunks.push(currentChunk);
+        
+        for (let i = 0; i < chunks.length; i++) {
+            if (chunks[i].trim().length > 0) {
+                await this.sendMessageWithMarkdown(chatId, chunks[i]);
+                if (i < chunks.length - 1) {
+                    await new Promise(resolve => setTimeout(resolve, 500));
+                }
+            }
+        }
+    }
+
+    /**
+     * Send long message with fallback cleaning (for non-LLM processed content)
      */
     async sendLongMessage(chatId, text) {
         const maxLength = 4096;
         
-        // Clean Claude Code output for Telegram
-        const cleanText = this.cleanClaudeCodeOutput(text);
+        // Apply minimal cleaning for fallback cases
+        const cleanText = this.cleanClaudeCodeOutputMinimal(text);
         
         // Don't send if cleaned text is empty (filtered out as noise)
         if (!cleanText || cleanText.trim().length === 0) {
@@ -479,7 +525,7 @@ class MessageHandler {
         }
         
         if (cleanText.length <= maxLength) {
-            await this.bot.sendMessage(chatId, cleanText);
+            await this.sendMessageWithMarkdown(chatId, cleanText);
             return;
         }
         
@@ -500,7 +546,7 @@ class MessageHandler {
         
         for (let i = 0; i < chunks.length; i++) {
             if (chunks[i].trim().length > 0) { // Only send non-empty chunks
-                await this.bot.sendMessage(chatId, chunks[i]);
+                await this.sendMessageWithMarkdown(chatId, chunks[i]);
                 if (i < chunks.length - 1) {
                     await new Promise(resolve => setTimeout(resolve, 500));
                 }
@@ -509,91 +555,58 @@ class MessageHandler {
     }
     
     /**
-     * Clean Claude Code output for Telegram
+     * Minimal cleaning for fallback cases (when LLM cleaning fails)
      */
-    cleanClaudeCodeOutput(text) {
+    cleanClaudeCodeOutputMinimal(text) {
         if (!text) return '';
         
-        // Remove ANSI escape codes (comprehensive)
+        // Only remove ANSI escape codes and control characters
         let cleaned = text.replace(/\x1b\[[0-9;]*[mGKH]/g, '');
         cleaned = cleaned.replace(/\x1b\[[\d;]*[A-Za-z]/g, '');
-        
-        // Remove other control characters except newlines and tabs
         cleaned = cleaned.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, '');
-        
-        // Remove box drawing characters and special symbols
-        cleaned = cleaned.replace(/[╭╮╯╰│─┌┐└┘├┤┬┴┼▶◀▲▼]/g, '');
-        
-        // Remove cursor positioning and other escape sequences
-        cleaned = cleaned.replace(/\x1b\[[\d;]*[A-Za-z]/g, '');
-        cleaned = cleaned.replace(/\[(\d+[A-Z]|\?[0-9]+[a-z])/g, '');
-        
-        // Clean up problematic markdown characters for Telegram
-        cleaned = cleaned.replace(/[_*`[\]()~>+\-#|{}]/g, function(match) {
-            return '\\' + match;
-        });
         
         // Remove excessive whitespace
         cleaned = cleaned.replace(/[ \t]+/g, ' ');
         cleaned = cleaned.replace(/\n\s*\n\s*\n+/g, '\n\n');
         
-        // Filter out noise lines
-        const lines = cleaned.split('\n');
-        const meaningfulLines = lines.filter(line => {
-            const trimmed = line.trim();
-            return trimmed.length > 0 && 
-                   !trimmed.match(/^[\s\-_=*#.]+$/) && // Skip decoration lines
-                   !trimmed.match(/^\?/) && // Skip help prompts
-                   !trimmed.match(/^[\s>]*$/) && // Skip empty prompts
-                   !trimmed.includes('shortcuts') &&
-                   !trimmed.includes('Bypassing Permissions') &&
-                   !trimmed.includes('Loading') &&
-                   !trimmed.match(/^Welcome to Claude/) &&
-                   !trimmed.match(/^✢.*Accomplishing.*/) && // Skip progress indicators
-                   !trimmed.match(/^\\\(.*·.*tokens.*\\\)/) && // Skip token counters
-                   !trimmed.match(/^\\>$/) && // Skip lone prompt symbols
-                   !trimmed.match(/^esc to interrupt/) && // Skip interrupt hints
-                   !trimmed.includes('↑ 0 tokens') &&
-                   !trimmed.includes('Accomplishing') &&
-                   !trimmed.includes('tokens ·') &&
-                   !trimmed.match(/^\d+s ·/) && // Skip time indicators like "3s ·"
-                   !trimmed.match(/^[\\>]+\s*$/) && // Skip escaped prompts
-                   !trimmed.includes('limit reached') && // Skip model limit messages
-                   !trimmed.includes('now using') && // Skip model switching messages
-                   !trimmed.match(/Sonnet \d+ ◯/) && // Skip model status indicators
-                   !trimmed.match(/Opus \d+ limit/) && // Skip specific limit messages
-                   !trimmed.match(/Claude.*limit.*reached/); // Skip Claude limit messages
-        });
-        
-        // Remove duplicates and very similar lines
-        const uniqueLines = [];
-        const seenLines = new Set();
-        
-        for (const line of meaningfulLines) {
-            const normalized = line.toLowerCase().replace(/[^\w\s]/g, '').replace(/\s+/g, ' ').trim();
-            if (!seenLines.has(normalized) && normalized.length > 3) {
-                seenLines.add(normalized);
-                uniqueLines.push(line);
-            }
-        }
-        
-        cleaned = uniqueLines.join('\n').trim();
-        
-        // Final safety checks - don't send if it's just noise
-        if (cleaned.length === 0 || 
-            cleaned.includes('processing your request') ||
-            cleaned.match(/^(Claude|Sonnet|Opus).*limit.*reached/i) ||
-            cleaned.match(/^now using/i)) {
-            return ''; // Return empty to suppress sending
-        }
-        
-        if (cleaned.length > 3000) {
-            cleaned = cleaned.substring(0, 2900) + '\n\n... (output truncated)';
-        }
-        
-        return cleaned;
+        return cleaned.trim();
+    }
+
+    /**
+     * DEPRECATED: Legacy cleaning function (kept for reference)
+     * The LLM should handle all formatting now
+     */
+    cleanClaudeCodeOutput(text) {
+        // Redirect to minimal cleaning - LLM should handle everything else
+        return this.cleanClaudeCodeOutputMinimal(text);
     }
     
+    /**
+     * Send message with proper Telegram markdown formatting
+     */
+    async sendMessageWithMarkdown(chatId, text) {
+        try {
+            // Try to send with Markdown formatting first
+            await this.bot.sendMessage(chatId, text, { parse_mode: 'Markdown' });
+        } catch (error) {
+            // If markdown fails, try without formatting
+            logger.warn(`Markdown formatting failed for chat ${chatId}, sending as plain text:`, error.message);
+            try {
+                // Remove markdown formatting and send as plain text
+                const plainText = text
+                    .replace(/```[\s\S]*?```/g, (match) => match.replace(/[`*_]/g, ''))
+                    .replace(/`([^`]+)`/g, '$1')
+                    .replace(/\*\*([^*]+)\*\*/g, '$1')
+                    .replace(/\*([^*]+)\*/g, '$1');
+                await this.bot.sendMessage(chatId, plainText);
+            } catch (secondError) {
+                logger.error(`Failed to send message to chat ${chatId}:`, secondError);
+                // As last resort, send a simple error message
+                await this.bot.sendMessage(chatId, '❌ Error sending formatted message');
+            }
+        }
+    }
+
     /**
      * Send error message
      */

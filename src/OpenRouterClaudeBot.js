@@ -4,13 +4,13 @@ const TelegramBot = require('node-telegram-bot-api');
 const Config = require('../config/config');
 const SessionManager = require('./managers/SessionManager');
 const ClaudeCodeManager = require('./managers/ClaudeCodeManager');
-const AIService = require('./services/AIService');
 const MessageHandler = require('./handlers/MessageHandler');
 const CallbackHandler = require('./handlers/CallbackHandler');
+const OutputCleanerService = require('./services/OutputCleanerService');
 const logger = require('./utils/logger');
 
 /**
- * Main bot class orchestrating OpenRouter and Claude Code
+ * Main bot class providing direct Claude Code access via Telegram
  */
 class OpenRouterClaudeBot {
     constructor() {
@@ -24,16 +24,16 @@ class OpenRouterClaudeBot {
         
         // Initialize managers and services
         this.sessionManager = new SessionManager();
-        this.aiService = new AIService(this.config);
-        this.claudeCodeManager = new ClaudeCodeManager(this.aiService);
+        this.claudeCodeManager = new ClaudeCodeManager();
+        this.outputCleanerService = new OutputCleanerService(this.config);
         
         // Initialize handlers
         this.messageHandler = new MessageHandler(
             this.bot,
             this.sessionManager,
             this.claudeCodeManager,
-            this.aiService,
-            this.config
+            this.config,
+            this.outputCleanerService
         );
         
         this.callbackHandler = new CallbackHandler(
@@ -45,7 +45,7 @@ class OpenRouterClaudeBot {
         this.setupEventHandlers();
         this.setupClaudeCodeHandlers();
         
-        logger.info('OpenRouter Claude Bot initialized', this.config.getSummary());
+        logger.info('Claude Code Telegram Bot initialized', this.config.getSummary());
     }
     
     /**
@@ -116,54 +116,59 @@ class OpenRouterClaudeBot {
                 const session = this.sessionManager.getClaudeAgentSession(agentId);
                 if (!session) return;
                 
-                // Analyze if we should forward to user or handle internally
-                const shouldForward = await this.aiService.shouldForwardToUser(question, session);
+                // Always forward Claude Code questions to user (no AI intermediary)
+                this.sessionManager.updateClaudeAgentSession(agentId, { 
+                    waitingForUserResponse: true,
+                    lastQuestion: question
+                });
                 
-                if (shouldForward) {
-                    this.sessionManager.updateClaudeAgentSession(agentId, { 
-                        waitingForUserResponse: true,
-                        lastQuestion: question
-                    });
-                    
-                    await this.bot.sendMessage(chatId,
-                        `💬 *Claude Code needs your input:*\n\n${question}`,
-                        {
-                            parse_mode: 'Markdown',
-                            reply_markup: {
-                                force_reply: true,
-                                input_field_placeholder: "Your response..."
-                            }
+                await this.bot.sendMessage(chatId,
+                    `💬 *Claude Code needs your input:*\n\n${question}`,
+                    {
+                        parse_mode: 'Markdown',
+                        reply_markup: {
+                            force_reply: true,
+                            input_field_placeholder: "Your response..."
                         }
-                    );
-                } else {
-                    // Let OpenRouter handle it
-                    const response = await this.aiService.generateResponseForClaude(question, session);
-                    await this.claudeCodeManager.sendToAgent(agentId, response);
-                }
+                    }
+                );
             } catch (error) {
                 logger.error('Error handling agent question:', error);
             }
         });
         
-        this.claudeCodeManager.on('agent-complete', async ({ taskId, code }) => {
-            const session = this.sessionManager.getClaudeAgentSession(taskId);
-            if (session) {
-                await this.bot.sendMessage(session.chatId,
-                    `✅ Claude Code agent completed task\n\n` +
-                    `Exit code: ${code}\n` +
-                    `Duration: ${Math.round((Date.now() - session.startTime) / 1000)}s`,
-                    { parse_mode: 'Markdown' }
-                );
-                this.sessionManager.deleteClaudeAgentSession(taskId);
+        this.claudeCodeManager.on('agent-output', async ({ agentId, chatId, text }) => {
+            try {
+                // Get conversation history for context
+                const conversationHistory = this.sessionManager.getConversationHistory(chatId);
+                
+                // Add this Claude output to conversation history
+                this.sessionManager.addToConversationHistory(chatId, 'claude', text);
+                
+                // Clean output using LLM with conversation context
+                await this.messageHandler.sendLongMessageWithCleaning(chatId, text, conversationHistory);
+                
+            } catch (error) {
+                logger.error('Error sending agent output to user:', error);
             }
         });
         
-        this.claudeCodeManager.on('agent-output', async ({ agentId, chatId, text }) => {
-            try {
-                // Send Claude Code output directly to user
-                await this.messageHandler.sendLongMessage(chatId, text);
-            } catch (error) {
-                logger.error('Error sending agent output to user:', error);
+        this.claudeCodeManager.on('agent-complete', async ({ taskId, code, fullOutput }) => {
+            const session = this.sessionManager.getClaudeAgentSession(taskId);
+            if (session) {
+                const duration = Math.round((Date.now() - session.startTime) / 1000);
+                await this.bot.sendMessage(session.chatId,
+                    `✅ Claude Code task completed (exit code: ${code}, ${duration}s)\\n\\n` +
+                    `💬 Send another message to continue with Claude Code!\\n` +
+                    `🔗 Context preserved - your conversation history is maintained.`,
+                    { parse_mode: 'Markdown' }
+                );
+                // Update session status but keep it alive for follow-up interactions
+                this.sessionManager.updateClaudeAgentSession(taskId, { 
+                    status: 'completed',
+                    completedAt: Date.now(),
+                    exitCode: code
+                });
             }
         });
         
@@ -171,42 +176,7 @@ class OpenRouterClaudeBot {
             const session = this.sessionManager.getClaudeAgentSession(taskId);
             if (session) {
                 await this.bot.sendMessage(session.chatId,
-                    `❌ Claude Code agent encountered an error:\\n\\n${error.message}`,
-                    { parse_mode: 'Markdown' }
-                );
-                this.sessionManager.deleteClaudeAgentSession(taskId);
-            }
-        });
-        
-        this.claudeCodeManager.on('agent-intervention-needed', async ({ agentId, chatId, lastLines, agent }) => {
-            logger.info(`Intervention needed for agent ${agentId}`);
-            
-            // Use detection model to confirm intervention is needed
-            const needsIntervention = await this.aiService.detectClaudeInterventionNeeded(lastLines);
-            
-            if (needsIntervention) {
-                // Use main model to generate appropriate command
-                const command = await this.aiService.generateInterventionCommand(lastLines, agent.task);
-                
-                logger.info(`Sending intervention command '${command}' to agent ${agentId}`);
-                await this.claudeCodeManager.sendCommand(agentId, command);
-                
-                // Notify user
-                await this.bot.sendMessage(chatId,
-                    `🤖 Claude Code needed intervention. Sent command: \`${command}\``,
-                    { parse_mode: 'Markdown' }
-                );
-            }
-        });
-        
-        this.claudeCodeManager.on('agent-complete', async ({ taskId, code, fullOutput }) => {
-            const session = this.sessionManager.getClaudeAgentSession(taskId);
-            if (session) {
-                // Use main model to process and summarize the output
-                const summary = await this.aiService.processClaudeOutput(fullOutput, session.task);
-                
-                await this.bot.sendMessage(session.chatId,
-                    `✅ Claude Code completed!\\n\\n${summary}`,
+                    `❌ Claude Code encountered an error:\\n\\n${error.message}`,
                     { parse_mode: 'Markdown' }
                 );
                 this.sessionManager.deleteClaudeAgentSession(taskId);
@@ -218,9 +188,8 @@ class OpenRouterClaudeBot {
      * Start the bot
      */
     start() {
-        logger.info('🚀 OpenRouter Claude Bot started!', {
-            mainModel: this.config.mainModel,
-            detectionModel: this.config.detectionModel,
+        logger.info('🚀 Claude Code Telegram Bot started!', {
+            architecture: 'Direct Claude Code routing (OpenRouter bypassed)',
             authorizedUsers: this.config.authorizedUsers.length,
             claudeAuthenticated: this.claudeCodeManager.isAuthenticated
         });
@@ -230,7 +199,7 @@ class OpenRouterClaudeBot {
      * Stop the bot gracefully
      */
     async stop() {
-        logger.info('Stopping OpenRouter Claude Bot...');
+        logger.info('Stopping Claude Code Telegram Bot...');
         
         // Kill all active Claude agents
         await this.claudeCodeManager.killAllAgents();

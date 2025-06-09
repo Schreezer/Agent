@@ -1,7 +1,7 @@
 {
-  "name": "openrouter-claude-bot",
+  "name": "claude-code-telegram-bot",
   "version": "1.0.0",
-  "description": "Intelligent Telegram bot combining OpenRouter AI with Claude Code CLI for advanced task execution",
+  "description": "Direct Claude Code access via Telegram bot for advanced task execution and automation",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
@@ -11,7 +11,7 @@
   "keywords": [
     "telegram",
     "bot",
-    "openrouter",
+    "claude-code",
     "claude",
     "ai",
     "automation"
@@ -20,9 +20,9 @@
   "license": "MIT",
   "dependencies": {
     "dotenv": "^16.0.0",
+    "node-fetch": "^2.6.7",
     "node-pty": "^1.0.0",
     "node-telegram-bot-api": "^0.64.0",
-    "openai": "^4.104.0",
     "winston": "^3.17.0"
   },
   "devDependencies": {

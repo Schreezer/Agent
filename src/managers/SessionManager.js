@@ -2,62 +2,12 @@ const logger = require('../utils/logger');
 const FileManager = require('../utils/fileManager');
 
 /**
- * Manages all bot sessions (OpenRouter and Claude Code)
+ * Manages Claude Code sessions and file uploads
  */
 class SessionManager {
     constructor() {
-        this.openRouterSessions = new Map();
         this.claudeAgentSessions = new Map();
         this.fileManager = new FileManager();
-    }
-    
-    /**
-     * Create a new OpenRouter session
-     */
-    createOpenRouterSession(chatId, task) {
-        const session = {
-            task,
-            messages: [],
-            waitingForResponse: false,
-            waitingForAuth: false,
-            pendingClaudeTask: null,
-            startTime: Date.now(),
-            interactions: 0,
-            detectionChecks: 0
-        };
-        
-        this.openRouterSessions.set(chatId, session);
-        logger.info(`Created OpenRouter session for chat ${chatId}`);
-        return session;
-    }
-    
-    /**
-     * Get OpenRouter session
-     */
-    getOpenRouterSession(chatId) {
-        return this.openRouterSessions.get(chatId);
-    }
-    
-    /**
-     * Update OpenRouter session
-     */
-    updateOpenRouterSession(chatId, updates) {
-        const session = this.openRouterSessions.get(chatId);
-        if (session) {
-            Object.assign(session, updates);
-        }
-        return session;
-    }
-    
-    /**
-     * Delete OpenRouter session
-     */
-    deleteOpenRouterSession(chatId) {
-        const deleted = this.openRouterSessions.delete(chatId);
-        if (deleted) {
-            logger.info(`Deleted OpenRouter session for chat ${chatId}`);
-        }
-        return deleted;
     }
     
     /**
@@ -73,7 +23,8 @@ class SessionManager {
             startTime: Date.now(),
             messages: [],
             waitingForUserResponse: false,
-            lastActivity: Date.now()
+            lastActivity: Date.now(),
+            conversationHistory: [] // Track full conversation for LLM cleaning
         };
         
         this.claudeAgentSessions.set(agentId, session);
@@ -138,9 +89,8 @@ class SessionManager {
      */
     getActiveSessionsCount() {
         return {
-            openRouter: this.openRouterSessions.size,
             claudeAgents: this.claudeAgentSessions.size,
-            total: this.openRouterSessions.size + this.claudeAgentSessions.size
+            total: this.claudeAgentSessions.size
         };
     }
     
@@ -149,11 +99,10 @@ class SessionManager {
      * @param {string} chatId - Telegram chat ID
      */
     hasActiveSession(chatId) {
-        const hasOpenRouter = this.openRouterSessions.has(chatId);
         const hasClaudeAgent = Array.from(this.claudeAgentSessions.values())
             .some(session => session.chatId.toString() === chatId.toString());
         
-        return { hasOpenRouter, hasClaudeAgent, hasAny: hasOpenRouter || hasClaudeAgent };
+        return { hasClaudeAgent, hasAny: hasClaudeAgent };
     }
     
     /**
@@ -161,7 +110,6 @@ class SessionManager {
      * @param {string} chatId - Telegram chat ID
      */
     clearAllSessionsForChat(chatId) {
-        const openRouterDeleted = this.deleteOpenRouterSession(chatId);
         
         const claudeAgentIds = Array.from(this.claudeAgentSessions.entries())
             .filter(([, session]) => session.chatId.toString() === chatId.toString())
@@ -170,12 +118,10 @@ class SessionManager {
         claudeAgentIds.forEach(agentId => this.deleteClaudeAgentSession(agentId));
         
         logger.info(`Cleared all sessions for chat ${chatId}`, {
-            openRouterDeleted,
             claudeAgentsDeleted: claudeAgentIds.length
         });
         
         return {
-            openRouterDeleted,
             claudeAgentsDeleted: claudeAgentIds.length
         };
     }
@@ -196,22 +142,11 @@ class SessionManager {
      */
     getSessionStats() {
         const stats = {
-            openRouter: {
-                total: this.openRouterSessions.size,
-                waitingForResponse: 0,
-                waitingForAuth: 0
-            },
             claudeAgents: {
                 total: this.claudeAgentSessions.size,
                 waitingForUserResponse: 0
             }
         };
-        
-        // Count OpenRouter session states
-        for (const session of this.openRouterSessions.values()) {
-            if (session.waitingForResponse) stats.openRouter.waitingForResponse++;
-            if (session.waitingForAuth) stats.openRouter.waitingForAuth++;
-        }
         
         // Count Claude agent session states
         for (const session of this.claudeAgentSessions.values()) {
@@ -227,14 +162,6 @@ class SessionManager {
     cleanupStaleSessions() {
         const oneHourAgo = Date.now() - (60 * 60 * 1000);
         let cleaned = 0;
-        
-        // Clean OpenRouter sessions
-        for (const [chatId, session] of this.openRouterSessions) {
-            if (session.startTime < oneHourAgo) {
-                this.openRouterSessions.delete(chatId);
-                cleaned++;
-            }
-        }
         
         // Clean Claude agent sessions
         for (const [agentId, session] of this.claudeAgentSessions) {
@@ -337,6 +264,65 @@ class SessionManager {
      */
     getFileManager() {
         return this.fileManager;
+    }
+
+    /**
+     * Add message to conversation history for LLM cleaning context
+     * @param {string} chatId - Telegram chat ID
+     * @param {string} type - 'user' or 'claude'
+     * @param {string} content - Message content
+     */
+    addToConversationHistory(chatId, type, content) {
+        // Find the most recent Claude agent session for this chat
+        const agents = this.getAllClaudeAgentSessionsForChat(chatId);
+        if (agents.length > 0) {
+            const latestAgent = agents[agents.length - 1];
+            const session = this.getClaudeAgentSession(latestAgent.agentId);
+            if (session) {
+                session.conversationHistory.push({
+                    type,
+                    content,
+                    timestamp: Date.now()
+                });
+                
+                // Limit history to last 20 messages to avoid memory bloat
+                if (session.conversationHistory.length > 20) {
+                    session.conversationHistory = session.conversationHistory.slice(-20);
+                }
+                
+                logger.debug(`Added ${type} message to conversation history for chat ${chatId}`);
+            }
+        }
+    }
+
+    /**
+     * Get conversation history for a chat (from most recent session)
+     * @param {string} chatId - Telegram chat ID
+     * @returns {Array} Conversation history
+     */
+    getConversationHistory(chatId) {
+        const agents = this.getAllClaudeAgentSessionsForChat(chatId);
+        if (agents.length > 0) {
+            const latestAgent = agents[agents.length - 1];
+            const session = this.getClaudeAgentSession(latestAgent.agentId);
+            return session ? session.conversationHistory : [];
+        }
+        return [];
+    }
+
+    /**
+     * Clear conversation history for a chat (called on /new)
+     * @param {string} chatId - Telegram chat ID
+     */
+    clearConversationHistory(chatId) {
+        const agents = this.getAllClaudeAgentSessionsForChat(chatId);
+        for (const agent of agents) {
+            const session = this.getClaudeAgentSession(agent.agentId);
+            if (session) {
+                session.conversationHistory = [];
+            }
+        }
+        logger.info(`Cleared conversation history for chat ${chatId}`);
     }
 }
 

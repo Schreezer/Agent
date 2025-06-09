@@ -1,57 +1,42 @@
 const { EventEmitter } = require('events');
-const { spawn } = require('child_process');
-const pty = require('node-pty');
+const fs = require('fs');
 const path = require('path');
-const fs = require('fs').promises;
 const logger = require('../utils/logger');
+const ClaudeAuthenticator = require('../utils/ClaudeAuthenticator');
+const PTYSessionHandler = require('../utils/PTYSessionHandler');
+const OutputDetector = require('../utils/OutputDetector');
 
 /**
  * Manages Claude Code CLI interactions
  * Handles authentication, agent lifecycle, and communication
  */
 class ClaudeCodeManager extends EventEmitter {
-    constructor(aiService = null) {
+    constructor() {
         super();
-        this.claudeProcess = null;
-        this.isAuthenticated = false;
         this.activeAgents = new Map();
-        this.authData = null;
-        this.aiService = aiService; // For intelligent output filtering
-        this.configPath = path.join(
-            process.env.HOME || process.env.USERPROFILE, 
-            '.claude-code-auth.json'
-        );
         
-        this.loadAuthData();
+        // Initialize utility components
+        this.authenticator = new ClaudeAuthenticator();
+        this.outputDetector = new OutputDetector();
+        this.ptyHandler = new PTYSessionHandler(this.outputDetector);
+        
+        // Set up event handling
+        this.setupEventHandlers();
     }
     
     /**
-     * Load saved authentication data
+     * Set up event handlers for utility components
      */
-    async loadAuthData() {
-        try {
-            const data = await fs.readFile(this.configPath, 'utf8');
-            this.authData = JSON.parse(data);
-            this.isAuthenticated = true;
-            logger.info('Claude Code auth data loaded');
-        } catch (error) {
-            logger.info('No Claude Code auth data found');
-        }
-    }
-    
-    /**
-     * Save authentication data
-     */
-    async saveAuthData(data) {
-        try {
-            await fs.writeFile(this.configPath, JSON.stringify(data, null, 2));
-            this.authData = data;
-            this.isAuthenticated = true;
-            logger.info('Claude Code auth data saved');
-        } catch (error) {
-            logger.error('Failed to save auth data:', error);
-            throw error;
-        }
+    setupEventHandlers() {
+        // Handle output check scheduling
+        this.on('schedule-output-check', (agent) => {
+            this.scheduleOutputCheck(agent);
+        });
+        
+        // Handle output checking and sending
+        this.on('check-and-send-output', (agent, forceSend = false) => {
+            this.checkAndSendOutput(agent, forceSend);
+        });
     }
     
     /**
@@ -59,116 +44,21 @@ class ClaudeCodeManager extends EventEmitter {
      * @param {string} chatId - Telegram chat ID for auth notifications
      */
     async initializeClaude(chatId) {
-        // First, check if Claude is already authenticated
-        const isAuth = await this.checkAuthentication();
-        if (isAuth) {
-            this.isAuthenticated = true;
-            return;
-        }
-        
-        // If not authenticated, we need to run interactive mode to get auth URL
-        return new Promise((resolve, reject) => {
-            const args = [];
-            
-            this.claudeProcess = spawn('claude', args, {
-                env: { ...process.env },
-                cwd: process.cwd()
-            });
-            
-            let output = '';
-            let authUrlDetected = false;
-            
-            this.claudeProcess.stdout.on('data', (data) => {
-                output += data.toString();
-                
-                // Detect authentication URL
-                const authUrlMatch = output.match(/https:\/\/auth\.anthropic\.com[^\s]+/);
-                if (authUrlMatch && !authUrlDetected) {
-                    authUrlDetected = true;
-                    this.emit('auth-required', {
-                        chatId,
-                        url: authUrlMatch[0]
-                    });
-                    // Kill the process since we got the URL
-                    this.claudeProcess.kill();
-                    resolve();
-                }
-            });
-            
-            this.claudeProcess.stderr.on('data', (data) => {
-                const error = data.toString();
-                logger.error('Claude stderr:', error);
-                
-                // Check for auth-related errors
-                if (error.includes('authentication') || error.includes('login')) {
-                    // Try to extract URL from error
-                    const urlMatch = error.match(/https:\/\/auth\.anthropic\.com[^\s]+/);
-                    if (urlMatch && !authUrlDetected) {
-                        authUrlDetected = true;
-                        this.emit('auth-required', {
-                            chatId,
-                            url: urlMatch[0]
-                        });
-                        this.claudeProcess.kill();
-                        resolve();
-                    }
-                }
-            });
-            
-            this.claudeProcess.on('error', (error) => {
-                logger.error('Claude process error:', error);
-                reject(error);
-            });
-            
-            // Timeout for initialization
-            setTimeout(() => {
-                if (!authUrlDetected) {
-                    this.claudeProcess.kill();
-                    reject(new Error('Claude initialization timeout - no auth URL found'));
-                }
-            }, 10000);
-        });
+        return await this.authenticator.initializeClaude(chatId, this);
     }
     
     /**
      * Check if Claude is authenticated
      */
     async checkAuthentication() {
-        return new Promise((resolve) => {
-            const checkProcess = spawn('claude', ['-p', 'echo test', '--dangerously-skip-permissions'], {
-                env: { ...process.env },
-                cwd: process.cwd()
-            });
-            
-            let hasError = false;
-            
-            checkProcess.stdout.on('data', (data) => {
-                // If we get any output, it's likely authenticated
-                resolve(true);
-            });
-            
-            checkProcess.stderr.on('data', (data) => {
-                hasError = true;
-                const error = data.toString();
-                if (error.includes('auth') || error.includes('login')) {
-                    resolve(false);
-                }
-            });
-            
-            checkProcess.on('close', (code) => {
-                if (code === 0 && !hasError) {
-                    resolve(true);
-                } else {
-                    resolve(false);
-                }
-            });
-            
-            // Quick timeout
-            setTimeout(() => {
-                checkProcess.kill();
-                resolve(false);
-            }, 3000);
-        });
+        return await this.authenticator.checkAuthentication();
+    }
+    
+    /**
+     * Get authentication status
+     */
+    getAuthStatus() {
+        return this.authenticator.getAuthStatus();
     }
     
     /**
@@ -191,6 +81,7 @@ class ClaudeCodeManager extends EventEmitter {
             chatId,
             task,
             ptyProcess: null,
+            status: 'initializing', // 'initializing', 'active', 'completed', 'error'
             fullOutput: '',
             lastLines: [],
             expectingResponse: false,
@@ -208,134 +99,30 @@ class ClaudeCodeManager extends EventEmitter {
                 timestamp: Date.now()
             }], // Track full conversation flow
             // Output tracking
-            lastSentBuffer: '' // Track what we last sent to avoid duplicates
+            lastSentBuffer: '', // Track what we last sent to avoid duplicates
+            // Exit tracking
+            exitCode: null,
+            exitSignal: null,
+            completedAt: null
         };
         
         this.activeAgents.set(taskId, agent);
         
         logger.info(`Creating interactive Claude agent ${taskId} for task: ${task}`);
         
+        // Ensure CLAUDE.md exists before initializing Claude Code
+        this.ensureClaudeMdExists();
+        
+        // Store chat context for file sending scripts
+        this.storeChatContext(chatId, taskId);
+        
         // Use PTY for full interactive Claude Code support
         logger.info(`Creating interactive Claude Code session for agent ${taskId} using PTY`);
         
-        this.createInteractiveSession(agent, task);
+        await this.ptyHandler.createSession(agent, task, this);
         return agent;
     }
     
-    /**
-     * Create interactive Claude Code session using PTY
-     */
-    async createInteractiveSession(agent, task) {
-        try {
-            const args = ['--dangerously-skip-permissions'];
-            
-            logger.info(`Starting PTY session: claude ${args.join(' ')}`);
-            
-            // Create pseudo-terminal
-            try {
-                agent.ptyProcess = pty.spawn('claude', args, {
-                    name: 'xterm-color',
-                    cols: 120,
-                    rows: 30,
-                    cwd: process.cwd(),
-                    env: { ...process.env }
-                });
-            } catch (error) {
-                logger.error(`Failed to spawn PTY for agent ${agent.id}:`, error);
-                this.activeAgents.delete(agent.id);
-                this.emit('agent-error', { taskId: agent.id, error });
-                return;
-            }
-        
-        logger.info(`PTY session created for agent ${agent.id}, PID: ${agent.ptyProcess.pid}`);
-        
-        // Handle output with intelligent filtering
-        agent.ptyProcess.onData((data) => {
-            try {
-                const output = data.toString();
-                agent.fullOutput += output;
-                agent.outputBuffer += output;
-                
-                // Update last lines for monitoring
-                const lines = agent.fullOutput.split('\n');
-                agent.lastLines = lines.slice(-10).filter(line => line.trim());
-                
-                // Check for ⏺ symbol in new output
-                const hasSymbol = output.includes('⏺');
-                if (hasSymbol) {
-                    logger.info(`Agent ${agent.id} ⏺ SYMBOL DETECTED in new output!`);
-                }
-                
-                logger.debug(`Agent ${agent.id} PTY output (${output.length} chars):`, output.slice(0, 200));
-                logger.debug(`Agent ${agent.id} buffer size: ${agent.outputBuffer.length}, last lines count: ${agent.lastLines.length}`);
-                
-                // Start/restart timer for intelligent output checking
-                this.scheduleOutputCheck(agent);
-                
-            } catch (error) {
-                logger.error(`Error processing PTY output for agent ${agent.id}:`, error);
-            }
-        });
-        
-        // Handle exit
-        agent.ptyProcess.onExit(({ exitCode, signal }) => {
-            try {
-                logger.info(`PTY session for agent ${agent.id} exited with code: ${exitCode}, signal: ${signal}`);
-                
-                if (agent.monitorInterval) {
-                    clearInterval(agent.monitorInterval);
-                }
-                
-                if (agent.outputCheckTimer) {
-                    clearInterval(agent.outputCheckTimer);
-                    agent.outputCheckTimer = null;
-                }
-                
-                // Send final output when agent exits
-                this.checkAndSendOutput(agent, true);
-                
-                this.activeAgents.delete(agent.id);
-                
-                this.emit('agent-complete', { 
-                    taskId: agent.id, 
-                    code: exitCode, 
-                    fullOutput: agent.fullOutput 
-                });
-            } catch (error) {
-                logger.error(`Error handling PTY exit for agent ${agent.id}:`, error);
-            }
-        });
-        
-            // Wait for Claude to initialize, then send task
-            setTimeout(() => {
-                try {
-                    if (agent.ptyProcess) {
-                        logger.info(`Sending task to Claude agent ${agent.id}: "${task}"`);
-                        // Send the task text first
-                        agent.ptyProcess.write(task);
-                        // Then send Enter key press (not as text)
-                        setTimeout(() => {
-                            agent.ptyProcess.write('\r');
-                            logger.info(`Sent Enter key to execute task for agent ${agent.id}`);
-                        }, 100);
-                        
-                        // Start monitoring
-                        this.startMonitoring(agent);
-                    } else {
-                        logger.error(`PTY process for agent ${agent.id} died before sending task`);
-                    }
-                } catch (error) {
-                    logger.error(`Error sending task to Claude agent ${agent.id}:`, error);
-                    this.emit('agent-error', { taskId: agent.id, error });
-                }
-            }, 3000); // Give Claude time to show welcome screen
-            
-        } catch (error) {
-            logger.error(`Error in createInteractiveSession for agent ${agent.id}:`, error);
-            this.activeAgents.delete(agent.id);
-            this.emit('agent-error', { taskId: agent.id, error });
-        }
-    }
     
     /**
      * OLD INTERACTIVE METHOD - DISABLED due to raw mode issues
@@ -541,142 +328,39 @@ class ClaudeCodeManager extends EventEmitter {
      */
     async sendCommand(agentId, command) {
         const agent = this.activeAgents.get(agentId);
-        if (!agent || !agent.ptyProcess) {
-            throw new Error('Agent not found or PTY session inactive');
+        if (!agent) {
+            throw new Error('Agent not found');
         }
         
-        switch (command.toUpperCase()) {
-            case 'ESCAPE':
-                agent.ptyProcess.write('\x1b'); // ESC key
-                logger.info(`Sent ESC key to agent ${agentId}`);
-                break;
-            case 'ENTER':
-                agent.ptyProcess.write('\r'); // Enter key (just \r)
-                logger.info(`Sent ENTER key to agent ${agentId}`);
-                break;
-            case 'EXIT':
-                agent.ptyProcess.write('\\exit\r\n'); // Exit command
-                logger.info(`Sent EXIT command to agent ${agentId}`);
-                break;
-            case 'UP':
-                agent.ptyProcess.write('\x1b[A'); // Up arrow
-                logger.info(`Sent UP arrow to agent ${agentId}`);
-                break;
-            case 'DOWN':
-                agent.ptyProcess.write('\x1b[B'); // Down arrow
-                logger.info(`Sent DOWN arrow to agent ${agentId}`);
-                break;
-            case 'LEFT':
-                agent.ptyProcess.write('\x1b[D'); // Left arrow
-                logger.info(`Sent LEFT arrow to agent ${agentId}`);
-                break;
-            case 'RIGHT':
-                agent.ptyProcess.write('\x1b[C'); // Right arrow
-                logger.info(`Sent RIGHT arrow to agent ${agentId}`);
-                break;
-            default:
-                // Send text input (follow-up questions, choices, filenames, etc.)
-                // Use same pattern as initial task - send text first, then Enter
-                agent.ptyProcess.write(command);
-                
-                // Update last user message for AI filtering context
-                agent.lastUserMessage = command;
-                
-                // Add to conversation history
-                agent.conversationHistory.push({
-                    type: 'user',
-                    content: command,
-                    timestamp: Date.now()
-                });
-                
-                setTimeout(() => {
-                    agent.ptyProcess.write('\r');
-                    logger.info(`Sent follow-up text and Enter to agent ${agentId}: "${command}"`);
-                    
-                    // Force an immediate output check after user input
-                    setTimeout(() => {
-                        this.checkAndSendOutput(agent);
-                    }, 3000); // Check 3 seconds after user input
-                }, 100);
+        // If agent is completed, restart it with the new command
+        if (agent.status === 'completed' || !agent.ptyProcess) {
+            logger.info(`Agent ${agentId} was completed, restarting with new command: "${command}"`);
+            agent.status = 'initializing';
+            agent.exitCode = null;
+            agent.exitSignal = null;
+            agent.completedAt = null;
+            
+            // Create new PTY session with the command
+            await this.ptyHandler.createSession(agent, command, this);
+            return;
+        }
+        
+        // Use PTYSessionHandler for command sending
+        this.ptyHandler.sendCommand(agent, command);
+        
+        // Force an immediate output check after user input for text commands
+        if (!['ESCAPE', 'ENTER', 'EXIT', 'UP', 'DOWN', 'LEFT', 'RIGHT'].includes(command.toUpperCase())) {
+            setTimeout(() => {
+                this.checkAndSendOutput(agent);
+            }, 3000); // Check 3 seconds after user input
         }
     }
     
     /**
-     * Extract content after ⏺ symbol from text
-     */
-    extractContentAfterSymbol(text) {
-        const symbolMatch = text.match(/⏺(.*)$/ms);
-        return symbolMatch ? symbolMatch[1].trim() : '';
-    }
-    
-    /**
-     * Check if Claude Code is still processing
-     */
-    isClaudeProcessing(text) {
-        // Multiple checks for processing state
-        
-        // 1. Check for "esc to interrupt" in various formats
-        const hasEscToInterrupt = /esc\s+to\s+interrupt/i.test(text);
-        
-        // 2. Check for active processing indicators like "Exploring..." with timer
-        const hasActiveTimer = /[✻⏺]\s*\w+…\s*\(\d+s\s*·/i.test(text);
-        
-        // 3. Check for "Waiting..." or "Running..." status
-        const hasActiveStatus = /⎿\s*(Waiting|Running|Processing|Exploring)\.{2,}/i.test(text);
-        
-        const isProcessing = hasEscToInterrupt || hasActiveTimer || hasActiveStatus;
-        
-        if (isProcessing) {
-            logger.debug(`Claude still processing - ESC:${hasEscToInterrupt}, Timer:${hasActiveTimer}, Status:${hasActiveStatus}`);
-        }
-        
-        return isProcessing;
-    }
-    
-    /**
-     * Detect if Claude Code has finished processing
+     * Detect if Claude Code has finished processing and has new output to send
      */
     detectNewCommandOutput(agent) {
-        // SUPER SIMPLE: Just check if "esc to interrupt" is gone
-        const isProcessing = this.isClaudeProcessing(agent.outputBuffer);
-        
-        logger.info(`Agent ${agent.id} processing check:`);
-        logger.info(`Has 'esc to interrupt': ${isProcessing}`);
-        logger.info(`Buffer size: ${agent.outputBuffer.length}`);
-        logger.info(`Last sent size: ${agent.lastSentBuffer ? agent.lastSentBuffer.length : 0}`);
-        
-        // Debug: Show a sample of the buffer to see what we're checking
-        if (agent.outputBuffer.length > 0) {
-            const bufferSample = agent.outputBuffer.substring(agent.outputBuffer.length - 500);
-            logger.debug(`Buffer tail (last 500 chars): ${bufferSample}`);
-        }
-        
-        // Send output when:
-        // 1. Claude is NOT processing (no "esc to interrupt")
-        // 2. We have substantial output (> 1000 chars)
-        // 3. Buffer is different from last sent
-        if (!isProcessing && agent.outputBuffer.length > 1000) {
-            // Check if this is new content
-            if (agent.outputBuffer !== agent.lastSentBuffer) {
-                logger.info(`Agent ${agent.id} READY TO SEND - Claude is done (no 'esc to interrupt')`);
-                
-                return { 
-                    hasNewOutput: true, 
-                    reason: `Claude finished processing (${agent.outputBuffer.length} chars ready)`
-                };
-            } else {
-                logger.info(`Agent ${agent.id} Same content as before - not sending again`);
-            }
-        } else if (isProcessing) {
-            logger.info(`Agent ${agent.id} Claude still processing - 'esc to interrupt' present`);
-        } else if (agent.outputBuffer.length <= 1000) {
-            logger.info(`Agent ${agent.id} Buffer too small (${agent.outputBuffer.length} chars) - waiting for more`);
-        }
-        
-        return { 
-            hasNewOutput: false, 
-            reason: isProcessing ? `Still processing` : `Waiting for more output` 
-        };
+        return this.outputDetector.detectNewCommandOutput(agent);
     }
     
     /**
@@ -765,8 +449,8 @@ class ClaudeCodeManager extends EventEmitter {
             
             logger.info(`Agent ${agent.id}: ${detection.reason}`);
             
-            // TEMP: Skip AI filtering - just use simple detection
-            logger.info(`TEMP: Skipping AI filter - sending based on simple detection`);
+            // Send output for processing (will be cleaned by OutputCleanerService)
+            logger.info(`Sending output for LLM cleaning: ${agent.outputBuffer.length} chars`);
             
             agent.conversationHistory.push({
                 type: 'claude',
@@ -874,10 +558,15 @@ class ClaudeCodeManager extends EventEmitter {
                 clearInterval(agent.outputCheckTimer);
                 agent.outputCheckTimer = null;
             }
-            if (agent.ptyProcess) {
-                agent.ptyProcess.kill();
-            }
+            // Use PTYSessionHandler to kill the process
+            this.ptyHandler.killProcess(agent);
             this.activeAgents.delete(agentId);
+            
+            // Clear chat context if this was the last agent
+            if (this.activeAgents.size === 0) {
+                this.clearChatContext();
+            }
+            
             logger.info(`Killed agent ${agentId}`);
         }
     }
@@ -894,12 +583,170 @@ class ClaudeCodeManager extends EventEmitter {
                 clearInterval(agent.outputCheckTimer);
                 agent.outputCheckTimer = null;
             }
-            if (agent.ptyProcess) {
-                agent.ptyProcess.kill();
-            }
+            // Use PTYSessionHandler to kill the process
+            this.ptyHandler.killProcess(agent);
             logger.info(`Killed agent ${agentId}`);
         }
         this.activeAgents.clear();
+        
+        // Clear chat context since all agents are killed
+        this.clearChatContext();
+    }
+    
+    /**
+     * Store chat context for file sending scripts
+     */
+    storeChatContext(chatId, agentId) {
+        const contextPath = path.join(__dirname, '..', '..', '.claude-context.json');
+        const context = {
+            chatId,
+            agentId,
+            timestamp: Date.now(),
+            projectDir: path.join(__dirname, '..', '..')
+        };
+        
+        try {
+            fs.writeFileSync(contextPath, JSON.stringify(context, null, 2));
+            logger.debug(`Stored chat context for agent ${agentId}, chat ${chatId}`);
+        } catch (error) {
+            logger.error('Error storing chat context:', error);
+        }
+    }
+    
+    /**
+     * Clear chat context
+     */
+    clearChatContext() {
+        const contextPath = path.join(__dirname, '..', '..', '.claude-context.json');
+        try {
+            if (fs.existsSync(contextPath)) {
+                fs.unlinkSync(contextPath);
+                logger.debug('Cleared chat context');
+            }
+        } catch (error) {
+            logger.error('Error clearing chat context:', error);
+        }
+    }
+    
+    /**
+     * Ensure CLAUDE.md has file sharing instructions
+     */
+    ensureClaudeMdExists() {
+        const claudeMdPath = path.join(__dirname, '..', '..', 'CLAUDE.md');
+        
+        try {
+            let existingContent = '';
+            if (fs.existsSync(claudeMdPath)) {
+                existingContent = fs.readFileSync(claudeMdPath, 'utf8');
+                
+                // Check if file sharing instructions already exist
+                if (existingContent.includes('📤 Sending Files to User') || existingContent.includes('scripts/send-file')) {
+                    logger.debug('CLAUDE.md already contains file sharing instructions');
+                    return;
+                }
+            }
+            
+            const fileInstructions = `
+
+## 📤 Sending Files to User
+
+You can send any file to the Telegram user using the provided script:
+
+\`\`\`bash
+# Send a file
+scripts/send-file path/to/your/file.txt
+
+# Send a file with a message
+scripts/send-file data.json "Here's the processed data!"
+
+# Send from any subdirectory
+./scripts/send-file reports/analysis.pdf "Analysis complete"
+\`\`\`
+
+**Examples:**
+\`\`\`bash
+# Send a log file
+scripts/send-file logs/debug.log "Debug information"
+
+# Send generated output
+scripts/send-file output.csv "CSV export ready"
+
+# Send images or documents
+scripts/send-file screenshot.png "Current state"
+scripts/send-file report.pdf
+\`\`\`
+
+**Notes:**
+- The script automatically detects the current Telegram chat
+- Maximum file size: 50MB (Telegram limit)
+- Supports all file types
+- Only works during an active Claude Code session
+
+## 📥 Accessing User-Uploaded Files
+
+Users can upload files through Telegram, and they are automatically saved to:
+
+\`\`\`bash
+telegram-uploads/chat_<chat_id>/
+\`\`\`
+
+**File Structure:**
+\`\`\`
+telegram-uploads/
+└── chat_123456789/
+    ├── document.pdf
+    ├── image.jpg
+    ├── data.json
+    └── archive.zip
+\`\`\`
+
+**Accessing Files in Code:**
+\`\`\`bash
+# List uploaded files
+ls telegram-uploads/chat_*/
+
+# Use uploaded files directly
+cat telegram-uploads/chat_*/document.txt
+python process.py telegram-uploads/chat_*/data.csv
+\`\`\`
+
+**File Information:**
+- Files are organized by chat ID
+- Original filenames are preserved
+- File metadata (size, upload time) is tracked
+- Users can manage their files via bot commands (\`/files\`, \`/delete\`, \`/cleanup\`)
+
+## 💡 File Sharing Tips
+
+1. **File Paths**: Use relative paths from the project root
+2. **Large Files**: For files >50MB, consider splitting or compressing
+3. **Organization**: Create subdirectories for organized output
+4. **User Files**: Always check \`telegram-uploads/\` for user-provided data
+
+This integration enables seamless file sharing between Claude Code and Telegram users!
+`;
+            
+            if (existingContent) {
+                // Append to existing content
+                const updatedContent = existingContent + fileInstructions;
+                fs.writeFileSync(claudeMdPath, updatedContent);
+                logger.info('Added file sharing instructions to existing CLAUDE.md');
+            } else {
+                // Create new file with basic header + file instructions
+                const newContent = `# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## Project Overview
+
+This is a Telegram bot that provides direct access to Claude Code capabilities through chat interface.
+${fileInstructions}`;
+                fs.writeFileSync(claudeMdPath, newContent);
+                logger.info('Created CLAUDE.md with file sharing instructions');
+            }
+        } catch (error) {
+            logger.error('Error updating CLAUDE.md:', error);
+        }
     }
 }
 
