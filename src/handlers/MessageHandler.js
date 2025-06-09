@@ -483,7 +483,7 @@ class MessageHandler {
         }
         
         if (cleanText.length <= maxLength) {
-            await this.bot.sendMessage(chatId, cleanText);
+            await this.sendMessageWithMarkdown(chatId, cleanText);
             return;
         }
         
@@ -504,7 +504,7 @@ class MessageHandler {
         
         for (let i = 0; i < chunks.length; i++) {
             if (chunks[i].trim().length > 0) { // Only send non-empty chunks
-                await this.bot.sendMessage(chatId, chunks[i]);
+                await this.sendMessageWithMarkdown(chatId, chunks[i]);
                 if (i < chunks.length - 1) {
                     await new Promise(resolve => setTimeout(resolve, 500));
                 }
@@ -605,6 +605,32 @@ class MessageHandler {
         return cleaned;
     }
     
+    /**
+     * Send message with proper Telegram markdown formatting
+     */
+    async sendMessageWithMarkdown(chatId, text) {
+        try {
+            // Try to send with Markdown formatting first
+            await this.bot.sendMessage(chatId, text, { parse_mode: 'Markdown' });
+        } catch (error) {
+            // If markdown fails, try without formatting
+            logger.warn(`Markdown formatting failed for chat ${chatId}, sending as plain text:`, error.message);
+            try {
+                // Remove markdown formatting and send as plain text
+                const plainText = text
+                    .replace(/```[\s\S]*?```/g, (match) => match.replace(/[`*_]/g, ''))
+                    .replace(/`([^`]+)`/g, '$1')
+                    .replace(/\*\*([^*]+)\*\*/g, '$1')
+                    .replace(/\*([^*]+)\*/g, '$1');
+                await this.bot.sendMessage(chatId, plainText);
+            } catch (secondError) {
+                logger.error(`Failed to send message to chat ${chatId}:`, secondError);
+                // As last resort, send a simple error message
+                await this.bot.sendMessage(chatId, '❌ Error sending formatted message');
+            }
+        }
+    }
+
     /**
      * Send error message
      */

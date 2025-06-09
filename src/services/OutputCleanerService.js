@@ -84,17 +84,32 @@ RAW CLAUDE CODE OUTPUT TO CLEAN:
 ${rawOutput}
 
 INSTRUCTIONS:
-1. **Clean the output**: Remove all unnecessary  noise, ANSI codes, progress indicators, animations, duplicate lines, and system messages
+1. **Clean the output**: Remove all unnecessary noise, ANSI codes, progress indicators, animations, duplicate lines, and system messages
 2. **Keep what matters**: Preserve actual responses, results, code, file contents, error messages, and meaningful user interactions
-3. **Format for Telegram**: Use proper markdown formatting, keep it readable on mobile
-4. **Context awareness**: Consider the conversation flow - if this looks like a continuation, acknowledgment, or final result
-5. **Intelligently summarize**: If the output is mostly noise with little useful info, provide a brief status update instead
-6. **Be concise**: Telegram users prefer clear, focused messages over verbose output
+3. **Format for Telegram**: Use proper Telegram markdown formatting:
+   - Use \`\`\`language for code blocks (e.g., \`\`\`python, \`\`\`javascript, \`\`\`bash)
+   - Use \`code\` for inline code snippets
+   - Use **bold** for important information, headings, file names
+   - Use *italic* for emphasis or secondary information
+   - Use bullet points with • or - for lists
+   - Keep line breaks for readability
+4. **Code formatting**: When code is present, always wrap it in proper markdown code blocks with language specification
+5. **Context awareness**: Consider the conversation flow - if this looks like a continuation, acknowledgment, or final result
+6. **Intelligently summarize**: If the output is mostly noise with little useful info, provide a brief status update instead
+7. **Be concise**: Telegram users prefer clear, focused messages over verbose output
+8. **File operations**: Format file paths, creation/modification messages clearly with **bold** file names
+
+TELEGRAM MARKDOWN RULES:
+- Code blocks: \`\`\`language\\ncode here\\n\`\`\`
+- Inline code: \`variable_name\` or \`function()\`
+- Bold: **important text**
+- Italic: *emphasized text*
+- Never use HTML tags, only Telegram markdown
 
 RESPONSE FORMAT:
-If the output contains useful information, return the cleaned version.
+If the output contains useful information, return the cleaned and properly formatted version.
 If the output is mostly noise/processing indicators, return a brief status like "Claude is working on your request..." or "Processing..." or return empty string to skip.
-If this appears to be a completion or result, make it clear and well-formatted.
+If this appears to be a completion or result, make it clear and well-formatted with appropriate markdown.
 
 CLEANED OUTPUT:`;
     }
