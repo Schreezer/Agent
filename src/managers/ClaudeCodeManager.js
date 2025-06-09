@@ -724,6 +724,55 @@ python process.py telegram-uploads/chat_*/data.csv
 4. **User Files**: Always check \`telegram-uploads/\` for user-provided data
 
 This integration enables seamless file sharing between Claude Code and Telegram users!
+
+## 📞 Making Voice Calls to User
+
+You can make voice calls to the Telegram user using the CallMeBot service:
+
+\`\`\`bash
+# Make a text-to-speech call
+scripts/make-call "Task completed successfully"
+
+# Call with custom voice and repetition
+scripts/make-call "Urgent: Check the logs" --lang=en-GB-Standard-B --repeat=2
+
+# Play an MP3 file
+scripts/make-call --mp3="https://example.com/alert.mp3"
+\`\`\`
+
+**Setup Required:**
+1. Add \`TELEGRAM_USERNAME=@yourusername\` to .env file
+2. Authorize CallMeBot: https://api2.callmebot.com/txt/login.php
+   OR send \`/start\` to @CallMeBot_txtbot on Telegram
+
+**Voice Options:**
+- \`en-US-Standard-A\` (default) - US English female
+- \`en-GB-Standard-B\` - British English male  
+- \`en-AU-Standard-A\` - Australian English female
+- \`fr-FR-Standard-A\` - French female
+- Many more languages available
+
+**Examples:**
+\`\`\`bash
+# Simple notification
+scripts/make-call "Build completed"
+
+# Urgent alert with repetition
+scripts/make-call "Error detected in logs" --repeat=3
+
+# Custom voice
+scripts/make-call "Analysis finished" --lang=en-GB-Standard-B
+
+# Play audio file
+scripts/make-call --mp3="https://mysite.com/success.mp3"
+\`\`\`
+
+**Notes:**
+- Maximum message length: 256 characters
+- Calls work with Telegram usernames or phone numbers
+- Requires active Claude Code session
+- iOS Telegram app may have audio playback issues
+
 `;
             
             if (existingContent) {

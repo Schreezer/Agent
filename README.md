@@ -81,6 +81,7 @@ openrouter-claude-bot/
 - `OPENROUTER_API_KEY`: OpenRouter API key for LLM-based output cleaning (recommended)
 - `TELEGRAM_AUTHORIZED_CHATS`: Comma-separated chat IDs for access control (leave empty for public access)
 - `CLAUDE_INIT_TIMEOUT`: Claude Code initialization timeout in seconds (default: 30)
+- `TELEGRAM_USERNAME`: Your Telegram @username for voice call capability (requires CallMeBot setup)
 
 ## Usage
 

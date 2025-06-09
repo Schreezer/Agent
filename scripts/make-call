@@ -1,0 +1,10 @@
+#!/bin/bash
+
+# Simple wrapper for Claude Code voice calling
+# Usage: scripts/make-call <message> [options]
+
+# Get the directory of this script
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Run the Node.js script
+node "$SCRIPT_DIR/make-call.js" "$@"
