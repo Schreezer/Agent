@@ -17,8 +17,8 @@ if (!botToken) {
     process.exit(1);
 }
 
-// Read chat context from temporary file
-const contextFile = path.join(__dirname, '..', '.claude-context.json');
+// Read chat context from parent directory (where Claude Code runs)
+const contextFile = path.join(__dirname, '..', '..', '.claude-context.json');
 let chatId;
 
 try {

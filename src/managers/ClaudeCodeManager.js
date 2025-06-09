@@ -597,12 +597,15 @@ class ClaudeCodeManager extends EventEmitter {
      * Store chat context for file sending scripts
      */
     storeChatContext(chatId, agentId) {
-        const contextPath = path.join(__dirname, '..', '..', '.claude-context.json');
+        // Store context in parent directory where Claude Code runs
+        const parentDir = path.join(__dirname, '..', '..', '..');
+        const contextPath = path.join(parentDir, '.claude-context.json');
         const context = {
             chatId,
             agentId,
             timestamp: Date.now(),
-            projectDir: path.join(__dirname, '..', '..')
+            projectDir: path.join(__dirname, '..', '..'),
+            parentDir: parentDir
         };
         
         try {
@@ -617,7 +620,8 @@ class ClaudeCodeManager extends EventEmitter {
      * Clear chat context
      */
     clearChatContext() {
-        const contextPath = path.join(__dirname, '..', '..', '.claude-context.json');
+        const parentDir = path.join(__dirname, '..', '..', '..');
+        const contextPath = path.join(parentDir, '.claude-context.json');
         try {
             if (fs.existsSync(contextPath)) {
                 fs.unlinkSync(contextPath);
@@ -629,10 +633,12 @@ class ClaudeCodeManager extends EventEmitter {
     }
     
     /**
-     * Ensure CLAUDE.md has file sharing instructions
+     * Ensure CLAUDE.md has file sharing instructions in the parent directory
      */
     ensureClaudeMdExists() {
-        const claudeMdPath = path.join(__dirname, '..', '..', 'CLAUDE.md');
+        // Create CLAUDE.md in the parent directory of the bot project (where Claude Code runs)
+        const botProjectDir = path.join(__dirname, '..', '..');
+        const claudeMdPath = path.join(botProjectDir, '..', 'CLAUDE.md');
         
         try {
             let existingContent = '';
@@ -648,130 +654,19 @@ class ClaudeCodeManager extends EventEmitter {
             
             const fileInstructions = `
 
-## 📤 Sending Files to User
-
-You can send any file to the Telegram user using the provided script:
-
+## 📤 Send Files to User
 \`\`\`bash
-# Send a file
-scripts/send-file path/to/your/file.txt
-
-# Send a file with a message
-scripts/send-file data.json "Here's the processed data!"
-
-# Send from any subdirectory
-./scripts/send-file reports/analysis.pdf "Analysis complete"
+agent/scripts/send-file path/to/file.txt "Optional message"
 \`\`\`
 
-**Examples:**
+## 📥 Access User Files
+User uploads are in: \`agent/telegram-uploads/chat_<id>/\`
+
+## 📞 Voice Calls
 \`\`\`bash
-# Send a log file
-scripts/send-file logs/debug.log "Debug information"
-
-# Send generated output
-scripts/send-file output.csv "CSV export ready"
-
-# Send images or documents
-scripts/send-file screenshot.png "Current state"
-scripts/send-file report.pdf
+agent/scripts/make-call "Message" --lang=en-GB-Standard-B
 \`\`\`
-
-**Notes:**
-- The script automatically detects the current Telegram chat
-- Maximum file size: 50MB (Telegram limit)
-- Supports all file types
-- Only works during an active Claude Code session
-
-## 📥 Accessing User-Uploaded Files
-
-Users can upload files through Telegram, and they are automatically saved to:
-
-\`\`\`bash
-telegram-uploads/chat_<chat_id>/
-\`\`\`
-
-**File Structure:**
-\`\`\`
-telegram-uploads/
-└── chat_123456789/
-    ├── document.pdf
-    ├── image.jpg
-    ├── data.json
-    └── archive.zip
-\`\`\`
-
-**Accessing Files in Code:**
-\`\`\`bash
-# List uploaded files
-ls telegram-uploads/chat_*/
-
-# Use uploaded files directly
-cat telegram-uploads/chat_*/document.txt
-python process.py telegram-uploads/chat_*/data.csv
-\`\`\`
-
-**File Information:**
-- Files are organized by chat ID
-- Original filenames are preserved
-- File metadata (size, upload time) is tracked
-- Users can manage their files via bot commands (\`/files\`, \`/delete\`, \`/cleanup\`)
-
-## 💡 File Sharing Tips
-
-1. **File Paths**: Use relative paths from the project root
-2. **Large Files**: For files >50MB, consider splitting or compressing
-3. **Organization**: Create subdirectories for organized output
-4. **User Files**: Always check \`telegram-uploads/\` for user-provided data
-
-This integration enables seamless file sharing between Claude Code and Telegram users!
-
-## 📞 Making Voice Calls to User
-
-You can make voice calls to the Telegram user using the CallMeBot service:
-
-\`\`\`bash
-# Make a text-to-speech call
-scripts/make-call "Task completed successfully"
-
-# Call with custom voice and repetition
-scripts/make-call "Urgent: Check the logs" --lang=en-GB-Standard-B --repeat=2
-
-# Play an MP3 file
-scripts/make-call --mp3="https://example.com/alert.mp3"
-\`\`\`
-
-**Setup Required:**
-1. Add \`TELEGRAM_USERNAME=@yourusername\` to .env file
-2. Authorize CallMeBot: https://api2.callmebot.com/txt/login.php
-   OR send \`/start\` to @CallMeBot_txtbot on Telegram
-
-**Voice Options:**
-- \`en-US-Standard-A\` (default) - US English female
-- \`en-GB-Standard-B\` - British English male  
-- \`en-AU-Standard-A\` - Australian English female
-- \`fr-FR-Standard-A\` - French female
-- Many more languages available
-
-**Examples:**
-\`\`\`bash
-# Simple notification
-scripts/make-call "Build completed"
-
-# Urgent alert with repetition
-scripts/make-call "Error detected in logs" --repeat=3
-
-# Custom voice
-scripts/make-call "Analysis finished" --lang=en-GB-Standard-B
-
-# Play audio file
-scripts/make-call --mp3="https://mysite.com/success.mp3"
-\`\`\`
-
-**Notes:**
-- Maximum message length: 256 characters
-- Calls work with Telegram usernames or phone numbers
-- Requires active Claude Code session
-- iOS Telegram app may have audio playback issues
+Setup: Add TELEGRAM_USERNAME to agent/.env and authorize CallMeBot
 
 `;
             
@@ -784,14 +679,10 @@ scripts/make-call --mp3="https://mysite.com/success.mp3"
                 // Create new file with basic header + file instructions
                 const newContent = `# CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
-
-## Project Overview
-
-This is a Telegram bot that provides direct access to Claude Code capabilities through chat interface.
+This directory contains a Telegram bot (in ./agent/) that provides direct access to Claude Code.
 ${fileInstructions}`;
                 fs.writeFileSync(claudeMdPath, newContent);
-                logger.info('Created CLAUDE.md with file sharing instructions');
+                logger.info('Created CLAUDE.md in parent directory with file sharing instructions');
             }
         } catch (error) {
             logger.error('Error updating CLAUDE.md:', error);

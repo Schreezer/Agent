@@ -11,8 +11,8 @@ const path = require('path');
 const https = require('https');
 const http = require('http');
 
-// Read chat context and configuration from temporary files
-const contextFile = path.join(__dirname, '..', '.claude-context.json');
+// Read chat context from parent directory (where Claude Code runs)
+const contextFile = path.join(__dirname, '..', '..', '.claude-context.json');
 const configFile = path.join(__dirname, '..', '.env');
 
 // Parse command line arguments
