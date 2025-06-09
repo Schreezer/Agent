@@ -1,4 +1,6 @@
 const { EventEmitter } = require('events');
+const fs = require('fs');
+const path = require('path');
 const logger = require('../utils/logger');
 const ClaudeAuthenticator = require('../utils/ClaudeAuthenticator');
 const PTYSessionHandler = require('../utils/PTYSessionHandler');
@@ -107,6 +109,12 @@ class ClaudeCodeManager extends EventEmitter {
         this.activeAgents.set(taskId, agent);
         
         logger.info(`Creating interactive Claude agent ${taskId} for task: ${task}`);
+        
+        // Ensure CLAUDE.md exists before initializing Claude Code
+        this.ensureClaudeMdExists();
+        
+        // Store chat context for file sending scripts
+        this.storeChatContext(chatId, taskId);
         
         // Use PTY for full interactive Claude Code support
         logger.info(`Creating interactive Claude Code session for agent ${taskId} using PTY`);
@@ -553,6 +561,12 @@ class ClaudeCodeManager extends EventEmitter {
             // Use PTYSessionHandler to kill the process
             this.ptyHandler.killProcess(agent);
             this.activeAgents.delete(agentId);
+            
+            // Clear chat context if this was the last agent
+            if (this.activeAgents.size === 0) {
+                this.clearChatContext();
+            }
+            
             logger.info(`Killed agent ${agentId}`);
         }
     }
@@ -574,6 +588,165 @@ class ClaudeCodeManager extends EventEmitter {
             logger.info(`Killed agent ${agentId}`);
         }
         this.activeAgents.clear();
+        
+        // Clear chat context since all agents are killed
+        this.clearChatContext();
+    }
+    
+    /**
+     * Store chat context for file sending scripts
+     */
+    storeChatContext(chatId, agentId) {
+        const contextPath = path.join(__dirname, '..', '..', '.claude-context.json');
+        const context = {
+            chatId,
+            agentId,
+            timestamp: Date.now(),
+            projectDir: path.join(__dirname, '..', '..')
+        };
+        
+        try {
+            fs.writeFileSync(contextPath, JSON.stringify(context, null, 2));
+            logger.debug(`Stored chat context for agent ${agentId}, chat ${chatId}`);
+        } catch (error) {
+            logger.error('Error storing chat context:', error);
+        }
+    }
+    
+    /**
+     * Clear chat context
+     */
+    clearChatContext() {
+        const contextPath = path.join(__dirname, '..', '..', '.claude-context.json');
+        try {
+            if (fs.existsSync(contextPath)) {
+                fs.unlinkSync(contextPath);
+                logger.debug('Cleared chat context');
+            }
+        } catch (error) {
+            logger.error('Error clearing chat context:', error);
+        }
+    }
+    
+    /**
+     * Ensure CLAUDE.md has file sharing instructions
+     */
+    ensureClaudeMdExists() {
+        const claudeMdPath = path.join(__dirname, '..', '..', 'CLAUDE.md');
+        
+        try {
+            let existingContent = '';
+            if (fs.existsSync(claudeMdPath)) {
+                existingContent = fs.readFileSync(claudeMdPath, 'utf8');
+                
+                // Check if file sharing instructions already exist
+                if (existingContent.includes('📤 Sending Files to User') || existingContent.includes('scripts/send-file')) {
+                    logger.debug('CLAUDE.md already contains file sharing instructions');
+                    return;
+                }
+            }
+            
+            const fileInstructions = `
+
+## 📤 Sending Files to User
+
+You can send any file to the Telegram user using the provided script:
+
+\`\`\`bash
+# Send a file
+scripts/send-file path/to/your/file.txt
+
+# Send a file with a message
+scripts/send-file data.json "Here's the processed data!"
+
+# Send from any subdirectory
+./scripts/send-file reports/analysis.pdf "Analysis complete"
+\`\`\`
+
+**Examples:**
+\`\`\`bash
+# Send a log file
+scripts/send-file logs/debug.log "Debug information"
+
+# Send generated output
+scripts/send-file output.csv "CSV export ready"
+
+# Send images or documents
+scripts/send-file screenshot.png "Current state"
+scripts/send-file report.pdf
+\`\`\`
+
+**Notes:**
+- The script automatically detects the current Telegram chat
+- Maximum file size: 50MB (Telegram limit)
+- Supports all file types
+- Only works during an active Claude Code session
+
+## 📥 Accessing User-Uploaded Files
+
+Users can upload files through Telegram, and they are automatically saved to:
+
+\`\`\`bash
+telegram-uploads/chat_<chat_id>/
+\`\`\`
+
+**File Structure:**
+\`\`\`
+telegram-uploads/
+└── chat_123456789/
+    ├── document.pdf
+    ├── image.jpg
+    ├── data.json
+    └── archive.zip
+\`\`\`
+
+**Accessing Files in Code:**
+\`\`\`bash
+# List uploaded files
+ls telegram-uploads/chat_*/
+
+# Use uploaded files directly
+cat telegram-uploads/chat_*/document.txt
+python process.py telegram-uploads/chat_*/data.csv
+\`\`\`
+
+**File Information:**
+- Files are organized by chat ID
+- Original filenames are preserved
+- File metadata (size, upload time) is tracked
+- Users can manage their files via bot commands (\`/files\`, \`/delete\`, \`/cleanup\`)
+
+## 💡 File Sharing Tips
+
+1. **File Paths**: Use relative paths from the project root
+2. **Large Files**: For files >50MB, consider splitting or compressing
+3. **Organization**: Create subdirectories for organized output
+4. **User Files**: Always check \`telegram-uploads/\` for user-provided data
+
+This integration enables seamless file sharing between Claude Code and Telegram users!
+`;
+            
+            if (existingContent) {
+                // Append to existing content
+                const updatedContent = existingContent + fileInstructions;
+                fs.writeFileSync(claudeMdPath, updatedContent);
+                logger.info('Added file sharing instructions to existing CLAUDE.md');
+            } else {
+                // Create new file with basic header + file instructions
+                const newContent = `# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## Project Overview
+
+This is a Telegram bot that provides direct access to Claude Code capabilities through chat interface.
+${fileInstructions}`;
+                fs.writeFileSync(claudeMdPath, newContent);
+                logger.info('Created CLAUDE.md with file sharing instructions');
+            }
+        } catch (error) {
+            logger.error('Error updating CLAUDE.md:', error);
+        }
     }
 }
 

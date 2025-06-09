@@ -1,0 +1,11 @@
+#!/bin/bash
+
+# Simple wrapper for Claude Code file sending
+# Usage: scripts/send-file <file_path> [message]
+
+# Get the directory of this script
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
+
+# Run the Node.js script
+node "$SCRIPT_DIR/send-file.js" "$@"
