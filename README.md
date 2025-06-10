@@ -184,4 +184,6 @@ Logs are written to both console and file (`logs/openrouter-claude-bot.log`). Lo
 
 ## License
 
-MIT License - see LICENSE file for details.
+Apache License 2.0 - see LICENSE file for details.
+
+This project is licensed under the Apache License 2.0, which allows for commercial use, modification, and distribution while requiring attribution to the original work. See the NOTICE file for attribution requirements.
